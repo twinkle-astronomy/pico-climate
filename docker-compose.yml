@@ -1,0 +1,12 @@
+services:
+  dev:
+    build: .
+    volumes:
+      - .:/app
+      - /media/cconstantine/RPI-RP2:/mnt/pico_drive
+    privileged: true
+    working_dir: /app
+    # Keep container running
+    stdin_open: true
+    tty: true
+    command: /bin/bash

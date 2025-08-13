@@ -1,0 +1,33 @@
+[package]
+name = "pico-climate"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+cortex-m = "0.7"
+cortex-m-rt = "0.7"
+embedded-hal = { version = "1.0.0" }
+
+panic-probe = { version = "1", features = [] }
+
+embassy-executor = { version = "0.8.0", features = ["arch-cortex-m", "executor-thread"] }
+embassy-time = { version = "0.4.0", features = [] }
+embassy-rp = { version = "0.7.0", features = ["time-driver", "rp2040", "critical-section-impl"] }
+defmt = "1.0.1"
+defmt-rtt = "1.0.0"
+cyw43 = "0.4.0"
+cyw43-pio = "0.6.0"
+embassy-net = { version = "0.7.0", features = ["tcp", "udp", "dhcpv4"] }
+static_cell = "2.1.1"
+portable-atomic = { version = "1.5", features = ["critical-section"] }
+
+#cyw43 = "0.1.0"
+#cyw43-pio = "0.1.0"
+#embassy-net = { version = "0.4.0", features = ["defmt", "tcp", "udp", "dhcpv4", "medium-ethernet"] }
+
+[profile.release]
+debug = 2
+
+[profile.dev]
+debug = 2
+opt-level = "z"
