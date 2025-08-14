@@ -55,10 +55,10 @@ fn build_app() -> picoserve::Router<impl picoserve::routing::PathRouter> {
 
 #[embassy_executor::task]
 async fn web_task(stack: &'static Stack<'static>) {
-    let mut rx_buffer = [0; 1024];
-    let mut tx_buffer = [0; 1024];
 
     loop {
+        let mut rx_buffer = [0; 1024];
+        let mut tx_buffer = [0; 1024];
         let mut socket = TcpSocket::new(*stack, &mut rx_buffer, &mut tx_buffer);
         socket.set_timeout(Some(Duration::from_secs(10)));
 
@@ -68,16 +68,13 @@ async fn web_task(stack: &'static Stack<'static>) {
         // Method 1: Simple router with global state
         let app = build_app();
         
-        let config = make_static!(
-            picoserve::Config<Duration>,
+        let config = 
             picoserve::Config::new(picoserve::Timeouts {
                 start_read_request: Some(Duration::from_secs(5)),
                 persistent_start_read_request: Some(Duration::from_secs(1)),
                 read_request: Some(Duration::from_secs(1)),
                 write: Some(Duration::from_secs(1)),
-            })
-            .keep_connection_alive()
-        );
+            });
 
         let mut http_buffer = [0; 2048];
         let _ = picoserve::serve(&app, &config, &mut http_buffer, socket).await;
