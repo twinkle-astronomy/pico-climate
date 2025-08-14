@@ -15,6 +15,7 @@ RUN rustup target add thumbv6m-none-eabi
 
 # Install additional components
 RUN rustup component add llvm-tools-preview
+RUN rustup component add rustfmt
 
 # Set working directory
 WORKDIR /app

@@ -17,9 +17,13 @@ defmt = "1.0.1"
 defmt-rtt = "1.0.0"
 cyw43 = "0.4.0"
 cyw43-pio = "0.6.0"
-embassy-net = { version = "0.7.0", features = ["tcp", "udp", "dhcpv4"] }
+embassy-net = { version = "0.7.0", features = ["tcp", "udp", "dhcpv4", "dhcpv4-hostname"] }
 static_cell = "2.1.1"
 portable-atomic = { version = "1.5", features = ["critical-section"] }
+rand_core = "0.9.3"
+heapless = "0.8.0"
+picoserve = { version = "0.16.0", features = ["embassy"] }
+embassy-sync = "0.7.1"
 
 #cyw43 = "0.1.0"
 #cyw43-pio = "0.1.0"

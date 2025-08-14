@@ -10,3 +10,6 @@ services:
     stdin_open: true
     tty: true
     command: /bin/bash
+    environment:
+      - WIFI_SSID
+      - WIFI_PASSWORD
