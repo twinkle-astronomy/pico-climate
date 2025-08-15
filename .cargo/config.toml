@@ -1,7 +1,7 @@
 [target.'cfg(all(target_arch = "arm", target_os = "none"))']
 # Choose a default "cargo run" tool:
-runner = "elf2uf2-rs -d"
-# runner = "probe-rs run --chip RP2040"
+#runner = "elf2uf2-rs -d"
+runner = "probe-rs run --chip RP2040"
 
 rustflags = [
   "-C", "linker=flip-link",
@@ -15,4 +15,4 @@ rustflags = [
 target = "thumbv6m-none-eabi"
 
 [env]
-DEFMT_LOG = "debug"
+DEFMT_LOG = "info"

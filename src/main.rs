@@ -14,23 +14,17 @@ use embassy_rp::{
 };
 use embassy_time::{Duration, Timer};
 use panic_probe as _;
-use cyw43::Control;
-use picoserve::response::IntoResponse;
-use picoserve::Router;
 use static_cell::StaticCell;
 
 use embassy_rp::clocks::RoscRng;
 use core::str::FromStr;
-use embassy_net::{Config as NetConfig, DhcpConfig, Stack, StackResources};
+use embassy_net::{Config as NetConfig, DhcpConfig, Stack};
 use picoserve::{
-    make_static,
-    response::DebugValue,
-    routing::{get, get_service, parse_path_segment, PathRouter},
-    AppRouter, AppWithStateBuilder,
+    routing::get,
 };
-use embassy_sync::{blocking_mutex::raw::CriticalSectionRawMutex, mutex::Mutex};
 
-use picoserve::extract::State;
+use defmt::{self as _, info};
+use defmt_rtt as _;
 
 bind_interrupts!(struct Irqs {
     PIO0_IRQ_0 => InterruptHandler<PIO0>;
@@ -85,6 +79,8 @@ async fn web_task(stack: &'static Stack<'static>) {
 async fn main(spawner: Spawner) {
     let p = embassy_rp::init(Default::default());
 
+    info!("Booting!");
+
     let fw = include_bytes!("../cyw43-firmware/43439A0.bin");
     let clm = include_bytes!("../cyw43-firmware/43439A0_clm.bin");
 
@@ -105,7 +101,6 @@ async fn main(spawner: Spawner) {
 
     static STATE: StaticCell<cyw43::State> = StaticCell::new();
     let state = STATE.init(cyw43::State::new());
-
     let (net_device, mut control, runner) = cyw43::new(state, pwr, spi, fw).await;
     let _ = spawner.spawn(cyw43_task(runner));
 
@@ -113,6 +108,8 @@ async fn main(spawner: Spawner) {
     control
         .set_power_management(cyw43::PowerManagementMode::PowerSave)
         .await;
+
+    info!("Set power management to PowerSave");
 
     control.gpio_set(0, false).await;
 
@@ -133,6 +130,7 @@ async fn main(spawner: Spawner) {
         seed
         );
     let _ = spawner.spawn(net_task(runner));
+    info!("Joining wifi {}", wifi_ssid);
     while let Err(_) = control
         .join(wifi_ssid, JoinOptions::new(wifi_password.as_bytes()))
         .await
@@ -147,7 +145,9 @@ async fn main(spawner: Spawner) {
     }
 
     stack.wait_link_up().await;
+    info!("Link up");
     stack.wait_config_up().await;
+    info!("Stack configured");
 
     static WEB_STACK: StaticCell<Stack<'_>> = StaticCell::new();
     let stack = WEB_STACK.init(stack);
