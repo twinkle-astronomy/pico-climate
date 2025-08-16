@@ -3,9 +3,7 @@
 
 use cyw43::JoinOptions;
 use cyw43_pio::PioSpi;
-// use defmt::*;
 use embassy_executor::Spawner;
-use embassy_net::tcp::TcpSocket;
 use embassy_rp::peripherals::{DMA_CH0, PIO0};
 use embassy_rp::{
     bind_interrupts,
@@ -14,14 +12,12 @@ use embassy_rp::{
 };
 use embassy_time::{Duration, Timer};
 use panic_probe as _;
+use pico_climate::http::web_task;
 use static_cell::StaticCell;
 
-use embassy_rp::clocks::RoscRng;
-use core::str::FromStr;
+use core::fmt::Write;
 use embassy_net::{Config as NetConfig, DhcpConfig, Stack};
-use picoserve::{
-    routing::get,
-};
+use embassy_rp::clocks::RoscRng;
 
 use defmt::{self as _, info};
 use defmt_rtt as _;
@@ -42,42 +38,27 @@ async fn net_task(mut runner: embassy_net::Runner<'static, cyw43::NetDriver<'sta
     runner.run().await
 }
 
-
-fn build_app() -> picoserve::Router<impl picoserve::routing::PathRouter> {
-    picoserve::Router::new().route("/", get(|| async move { "Hello World" }))
-}
-
-#[embassy_executor::task]
-async fn web_task(stack: &'static Stack<'static>) {
-
-    loop {
-        let mut rx_buffer = [0; 1024];
-        let mut tx_buffer = [0; 1024];
-        let mut socket = TcpSocket::new(*stack, &mut rx_buffer, &mut tx_buffer);
-        socket.set_timeout(Some(Duration::from_secs(10)));
-
-        if let Err(_) = socket.accept(80).await {
-            continue;
-        }
-        // Method 1: Simple router with global state
-        let app = build_app();
-        
-        let config = 
-            picoserve::Config::new(picoserve::Timeouts {
-                start_read_request: Some(Duration::from_secs(5)),
-                persistent_start_read_request: Some(Duration::from_secs(1)),
-                read_request: Some(Duration::from_secs(1)),
-                write: Some(Duration::from_secs(1)),
-            });
-
-        let mut http_buffer = [0; 2048];
-        let _ = picoserve::serve(&app, &config, &mut http_buffer, socket).await;
-    }
+fn create_unique_hostname(uid: [u8; 8]) -> heapless::String<32> {
+    let mut hostname = heapless::String::new();
+    write!(
+        &mut hostname,
+        "pico-climate-{:02x}{:02x}{:02x}{:02x}",
+        uid[4], uid[5], uid[6], uid[7]
+    )
+    .unwrap();
+    hostname
 }
 
 #[embassy_executor::main]
 async fn main(spawner: Spawner) {
     let p = embassy_rp::init(Default::default());
+
+    let mut flash =
+        embassy_rp::flash::Flash::<_, embassy_rp::flash::Async, { 2 * 1024 * 1024 }>::new(
+            p.FLASH, p.DMA_CH1,
+        );
+    let mut uid = [0u8; 8];
+    flash.blocking_unique_id(&mut uid).unwrap();
 
     info!("Booting!");
 
@@ -115,11 +96,10 @@ async fn main(spawner: Spawner) {
 
     let wifi_ssid = env!("WIFI_SSID");
     let wifi_password = env!("WIFI_PASSWORD");
-    const CLIENT_NAME: &str = "pico-climate";
     let seed: u64 = RoscRng.next_u64();
 
     let mut dhcp_config = DhcpConfig::default();
-    dhcp_config.hostname = Some(heapless::String::from_str(CLIENT_NAME).unwrap());
+    dhcp_config.hostname = Some(create_unique_hostname(uid));
     let net_config = NetConfig::dhcpv4(dhcp_config);
 
     static RESOURCES: StaticCell<embassy_net::StackResources<32>> = StaticCell::new();
@@ -127,30 +107,35 @@ async fn main(spawner: Spawner) {
         net_device,
         net_config,
         RESOURCES.init(embassy_net::StackResources::new()),
-        seed
-        );
+        seed,
+    );
     let _ = spawner.spawn(net_task(runner));
-    info!("Joining wifi {}", wifi_ssid);
-    while let Err(_) = control
-        .join(wifi_ssid, JoinOptions::new(wifi_password.as_bytes()))
-        .await
-    {
-        for _ in 0..10 {
-            control.gpio_set(0, true).await;
-            Timer::after(Duration::from_millis(100)).await;
-
-            control.gpio_set(0, false).await;
-            Timer::after(Duration::from_millis(100)).await;
-        }
-    }
-
-    stack.wait_link_up().await;
-    info!("Link up");
-    stack.wait_config_up().await;
-    info!("Stack configured");
 
     static WEB_STACK: StaticCell<Stack<'_>> = StaticCell::new();
     let stack = WEB_STACK.init(stack);
     let _ = spawner.spawn(web_task(stack));
 
+    loop {
+        info!("Joining wifi {}", wifi_ssid);
+        while let Err(_) = control
+            .join(wifi_ssid, JoinOptions::new(wifi_password.as_bytes()))
+            .await
+        {
+            for _ in 0..10 {
+                control.gpio_set(0, true).await;
+                Timer::after(Duration::from_millis(100)).await;
+
+                control.gpio_set(0, false).await;
+                Timer::after(Duration::from_millis(100)).await;
+            }
+        }
+
+        stack.wait_link_up().await;
+        info!("Link up");
+        stack.wait_config_up().await;
+        info!("Stack configured");
+        info!("Hostname: '{}'", create_unique_hostname(uid));
+
+        stack.wait_link_down().await;
+    }
 }
