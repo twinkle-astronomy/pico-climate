@@ -20,16 +20,10 @@ defmt-rtt = "1.0"
 cyw43 = { version = "0.4.0", features = ["defmt", "firmware-logs"] }
 cyw43-pio = { version = "0.6.0", features = ["defmt"] }
 static_cell = "2.1.1"
-portable-atomic = { version = "1.5", features = ["critical-section"] }
+portable-atomic = { version = "1.5", features = ["critical-section", "float"] }
 rand_core = "0.9.3"
 heapless = "0.8.0"
 picoserve = { version = "0.16.0", features = ["embassy"] }
-# edge-mdns = { version = "0.6.1", features = ["defmt"]}
-# edge-nal-std = {version = "0.5.0"}
-
-#cyw43 = "0.1.0"
-#cyw43-pio = "0.1.0"
-#embassy-net = { version = "0.4.0", features = ["defmt", "tcp", "udp", "dhcpv4", "medium-ethernet"] }
 
 [profile.release]
 debug = 2

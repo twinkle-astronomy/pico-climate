@@ -4,6 +4,7 @@
 use cyw43::JoinOptions;
 use cyw43_pio::PioSpi;
 use embassy_executor::Spawner;
+use embassy_rp::adc::{Adc, Channel};
 use embassy_rp::peripherals::{DMA_CH0, PIO0};
 use embassy_rp::{
     bind_interrupts,
@@ -12,6 +13,7 @@ use embassy_rp::{
 };
 use embassy_time::{Duration, Timer};
 use panic_probe as _;
+use pico_climate::adc_temp_sensor;
 use pico_climate::http::web_task;
 use static_cell::StaticCell;
 
@@ -24,7 +26,10 @@ use defmt_rtt as _;
 
 bind_interrupts!(struct Irqs {
     PIO0_IRQ_0 => InterruptHandler<PIO0>;
+    ADC_IRQ_FIFO => embassy_rp::adc::InterruptHandler;
 });
+
+defmt::timestamp!("{=u64:us}",embassy_time::Instant::now().as_micros());
 
 #[embassy_executor::task]
 async fn cyw43_task(
@@ -52,6 +57,13 @@ fn create_unique_hostname(uid: [u8; 8]) -> heapless::String<32> {
 #[embassy_executor::main]
 async fn main(spawner: Spawner) {
     let p = embassy_rp::init(Default::default());
+
+    let temp_sensor = Channel::new_temp_sensor(p.ADC_TEMP_SENSOR);
+    let adc = Adc::new(p.ADC, Irqs, embassy_rp::adc::Config::default());
+    
+
+    static TEMP_SENSOR: StaticCell<adc_temp_sensor::Sensor> = StaticCell::new();
+    let temp_sensor = TEMP_SENSOR.init(adc_temp_sensor::Sensor { temp_sensor, adc });
 
     let mut flash =
         embassy_rp::flash::Flash::<_, embassy_rp::flash::Async, { 2 * 1024 * 1024 }>::new(
@@ -113,7 +125,7 @@ async fn main(spawner: Spawner) {
 
     static WEB_STACK: StaticCell<Stack<'_>> = StaticCell::new();
     let stack = WEB_STACK.init(stack);
-    let _ = spawner.spawn(web_task(stack));
+    let _ = spawner.spawn(web_task(stack, temp_sensor));
 
     loop {
         info!("Joining wifi {}", wifi_ssid);
