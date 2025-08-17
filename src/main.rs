@@ -58,8 +58,8 @@ fn create_unique_hostname(uid: [u8; 8]) -> heapless::String<32> {
 async fn main(spawner: Spawner) {
     let p = embassy_rp::init(Default::default());
 
-    let temp_sensor = Channel::new_temp_sensor(p.ADC_TEMP_SENSOR);
     let adc = Adc::new(p.ADC, Irqs, embassy_rp::adc::Config::default());
+    let temp_sensor = Channel::new_temp_sensor(p.ADC_TEMP_SENSOR);
     
 
     static TEMP_SENSOR: StaticCell<adc_temp_sensor::Sensor> = StaticCell::new();
