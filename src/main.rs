@@ -5,7 +5,8 @@ use cyw43::JoinOptions;
 use cyw43_pio::PioSpi;
 use embassy_executor::Spawner;
 use embassy_rp::adc::{Adc, Channel};
-use embassy_rp::peripherals::{DMA_CH0, PIO0};
+use embassy_rp::i2c::{self, I2c};
+use embassy_rp::peripherals::{DMA_CH0, I2C0, PIO0};
 use embassy_rp::{
     bind_interrupts,
     gpio::{Level, Output},
@@ -14,7 +15,7 @@ use embassy_rp::{
 use embassy_time::{Duration, Timer};
 use panic_probe as _;
 use pico_climate::adc_temp_sensor;
-use pico_climate::http::web_task;
+use pico_climate::http::{web_task, AppState};
 use static_cell::StaticCell;
 
 use core::fmt::Write;
@@ -27,9 +28,10 @@ use defmt_rtt as _;
 bind_interrupts!(struct Irqs {
     PIO0_IRQ_0 => InterruptHandler<PIO0>;
     ADC_IRQ_FIFO => embassy_rp::adc::InterruptHandler;
+    I2C0_IRQ => i2c::InterruptHandler<I2C0>;
 });
 
-defmt::timestamp!("{=u64:us}",embassy_time::Instant::now().as_micros());
+defmt::timestamp!("{=u64:us}", embassy_time::Instant::now().as_micros());
 
 #[embassy_executor::task]
 async fn cyw43_task(
@@ -58,12 +60,21 @@ fn create_unique_hostname(uid: [u8; 8]) -> heapless::String<32> {
 async fn main(spawner: Spawner) {
     let p = embassy_rp::init(Default::default());
 
+    //Onboard temp sensor
     let adc = Adc::new(p.ADC, Irqs, embassy_rp::adc::Config::default());
     let temp_sensor = Channel::new_temp_sensor(p.ADC_TEMP_SENSOR);
-    
-
     static TEMP_SENSOR: StaticCell<adc_temp_sensor::Sensor> = StaticCell::new();
     let temp_sensor = TEMP_SENSOR.init(adc_temp_sensor::Sensor { temp_sensor, adc });
+
+    //STH30 Sensor
+    // Configure I2C
+    let sda = p.PIN_4; // GPIO4 as SDA
+    let scl = p.PIN_5; // GPIO5 as SCL
+
+    let mut config = i2c::Config::default();
+    config.frequency = 100_000; // 100kHz
+
+    let i2c = I2c::new_async(p.I2C0, scl, sda, Irqs, config);
 
     let mut flash =
         embassy_rp::flash::Flash::<_, embassy_rp::flash::Async, { 2 * 1024 * 1024 }>::new(
@@ -84,7 +95,7 @@ async fn main(spawner: Spawner) {
     let spi = PioSpi::new(
         &mut pio.common,
         pio.sm0,
-        cyw43_pio::DEFAULT_CLOCK_DIVIDER,
+        cyw43_pio::RM2_CLOCK_DIVIDER,
         pio.irq0,
         cs,
         p.PIN_24,
@@ -98,13 +109,13 @@ async fn main(spawner: Spawner) {
     let _ = spawner.spawn(cyw43_task(runner));
 
     control.init(clm).await;
+    control.gpio_set(0, true).await;
+
     control
         .set_power_management(cyw43::PowerManagementMode::PowerSave)
         .await;
 
     info!("Set power management to PowerSave");
-
-    control.gpio_set(0, false).await;
 
     let wifi_ssid = env!("WIFI_SSID");
     let wifi_password = env!("WIFI_PASSWORD");
@@ -125,19 +136,27 @@ async fn main(spawner: Spawner) {
 
     static WEB_STACK: StaticCell<Stack<'_>> = StaticCell::new();
     let stack = WEB_STACK.init(stack);
-    let _ = spawner.spawn(web_task(stack, temp_sensor));
+
+
+    static APP_STATE: StaticCell<AppState> = StaticCell::new();
+    let app_state = APP_STATE.init(AppState::new(temp_sensor, i2c).await.unwrap());
+
+    for id in 0..16 {
+        spawner.must_spawn(web_task(id, stack, app_state));
+    }
 
     loop {
+        control.gpio_set(0, true).await;
         info!("Joining wifi {}", wifi_ssid);
         while let Err(_) = control
             .join(wifi_ssid, JoinOptions::new(wifi_password.as_bytes()))
             .await
         {
-            for _ in 0..10 {
-                control.gpio_set(0, true).await;
+            for _ in 0..5 {
+                control.gpio_set(0, false).await;
                 Timer::after(Duration::from_millis(100)).await;
 
-                control.gpio_set(0, false).await;
+                control.gpio_set(0, true).await;
                 Timer::after(Duration::from_millis(100)).await;
             }
         }
@@ -145,6 +164,8 @@ async fn main(spawner: Spawner) {
         stack.wait_link_up().await;
         info!("Link up");
         stack.wait_config_up().await;
+        control.gpio_set(0, false).await;
+
         info!("Stack configured");
         info!("Hostname: '{}'", create_unique_hostname(uid));
 

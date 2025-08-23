@@ -44,6 +44,10 @@ impl<'a> Sample<'a> {
     pub fn set(&self, value: f32) {
         self.value.store(value, SeqCst);
     }
+
+    pub fn incr(&self, value: f32) {
+        self.value.fetch_add(value, SeqCst);
+    }
 }
 
 impl MetricFamily {
@@ -109,7 +113,7 @@ impl Chunks for MetricsResponse {
                     if i > 0 {
                         write!(chunk_writer, ",").await?;
                     }
-                    write!(chunk_writer, "\"{}\"=\"{}\"", label_name, label_value).await?;
+                    write!(chunk_writer, "{}=\"{}\"", label_name, label_value).await?;
                     chunk_writer.flush().await?;
                 }
                 chunk_writer.flush().await?;

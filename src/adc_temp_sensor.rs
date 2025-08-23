@@ -18,7 +18,7 @@ impl<'a> Sensor<'a> {
         // Convert to temperature in Celsius
         // RP2040 datasheet formula: T = 27 - (ADC_voltage - 0.706)/0.001721
         let volt = (raw as f32 * 3.29) / 4096.0; // 12-bit ADC, 3.3V reference
-        let temp_celsius = 27. - (volt - 0.706)/0.001721;
+        let temp_celsius = 27. - (volt - 0.706) / 0.001721;
 
         Ok(Value {
             temp_celsius,
