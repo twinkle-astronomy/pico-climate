@@ -34,7 +34,7 @@ A Raspberry Pi Pico-based temperature and humidity sensor built with Rust and Em
    ```
    The debug log will give you the hostname used to join the network.
 
-6. Connect to prometheus
+6. **Connect to prometheus**
    The pico will boot up and join the configured wifi network.  Its dhcp lease will have a hostname like `pico-climate-ID`.  Find it in your router, and add a job to your prometheus config.  You can also hit the metrics endpoint with `curl -i http://NETWORK_LOCATION/metrics`
    Example prometheus config:
    ```
