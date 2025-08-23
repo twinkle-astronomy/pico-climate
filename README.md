@@ -6,8 +6,9 @@ A Raspberry Pi Pico-based temperature and humidity sensor built with Rust and Em
 
 - Docker and Docker Compose installed
 - A Raspberry Pi Pico W board
+- An STH30 Temperature/Humidity sensor wired to I2C bus 0
 - USB cable to connect the Pico
-- Debug probe
+- Debug probe [optional]
 
 ## Quick Start
 
@@ -24,16 +25,26 @@ A Raspberry Pi Pico-based temperature and humidity sensor built with Rust and Em
 
 3. **Build and start the development container:**
    ```bash
-   docker-compose up -d
+   docker compose run dev bash
    ```
 
-4. **Enter the container:**
-   ```bash
-   docker-compose exec dev bash
-   ```
-5. ** Run in debug mode using probe**
+5. **Run in debug mode using probe**
    ```bash
    cargo run
+   ```
+   The debug log will give you the hostname used to join the network.
+
+6. Connect to prometheus
+   The pico will boot up and join the configured wifi network.  Its dhcp lease will have a hostname like `pico-climate-ID`.  Find it in your router, and add a job to your prometheus config.  You can also hit the metrics endpoint with `curl -i http://NETWORK_LOCATION/metrics`
+   Example prometheus config:
+   ```
+   scrape_configs:
+     - job_name: 'pico-climate'
+       static_configs:
+         - targets:
+           - 'pico-climate-e38a2a2a.lan:80'
+           labels:
+             location: "Chris Office"
    ```
 
 ## Flashing Your Pico
