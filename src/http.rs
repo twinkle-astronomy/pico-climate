@@ -42,14 +42,14 @@ static METRICS: [MetricFamily; 5] = [
     ),
     MetricFamily::new(
         "sth30_status",
-        "Reading from STH30 Sensor",
+        "STH30 Status Registers",
         crate::prometheus::MetricType::Gauge,
         &["feature"],
         &STH30_STATUSES,
     ),
     MetricFamily::new(
         "sth30_error",
-        "Reading from STH30 Sensor",
+        "Errors reading from STH30 Sensor",
         crate::prometheus::MetricType::Counter,
         &[],
         &STH30_ERRORS,

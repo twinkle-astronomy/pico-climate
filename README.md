@@ -1,6 +1,32 @@
-# pico-climate: Temperature & Humidity Sensor
+# pico-climate: Temperature & Humidity Sensor Prometheus Exporter
 
-A Raspberry Pi Pico-based temperature and humidity sensor built with Rust and Embassy framework, running in a Docker development environment.
+A Raspberry Pi Pico-based temperature and humidity sensor that exports readings as prometheus metrics.
+
+Provides the following metrics
+```
+# HELP http_request_count Number of http requests recieved
+# TYPE http_request_count counter
+http_request_count{} 2
+# HELP adc_temp_sensor Value of onboard temp sensor
+# TYPE adc_temp_sensor gauge
+adc_temp_sensor{unit="C"} 28.847847
+adc_temp_sensor{unit="volts"} 0.7028198
+adc_temp_sensor{unit="raw"} 875
+# HELP sth30_reading Reading from STH30 Sensor
+# TYPE sth30_reading gauge
+sth30_reading{sensor="temperature"} 23.194855
+sth30_reading{sensor="humidity"} 45.282673
+# HELP sth30_status STH30 Status Registers
+# TYPE sth30_status gauge
+sth30_status{feature="heater_status"} 0
+sth30_status{feature="humidity_tracking_alert"} 0
+sth30_status{feature="temperature_tracking_alert"} 0
+sth30_status{feature="command_status_success"} 0
+sth30_status{feature="write_data_checksum_status"} 0
+# HELP sth30_error Errors reading from STH30 Sensor
+# TYPE sth30_error counter
+sth30_error{} 0
+```
 
 ## Prerequisites
 
