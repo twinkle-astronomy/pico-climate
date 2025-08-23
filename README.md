@@ -49,7 +49,7 @@ A Raspberry Pi Pico-based temperature and humidity sensor built with Rust and Em
          - targets:
            - 'pico-climate-e38a2a2a.lan:80'
            labels:
-             location: "Chris Office"
+             location: "Office"
    ```
 
 ## Flashing Your Pico
