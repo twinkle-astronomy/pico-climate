@@ -3,10 +3,10 @@ services:
     build: .
     volumes:
       - .:/app
-      - /media/cconstantine/RPI-RP2:/mnt/pico_drive
       - "/dev/bus/usb:/dev/bus/usb"
     devices:
       - "/dev/bus/usb:/dev/bus/usb"
+    env_file: ".env"
     privileged: true
     working_dir: /app
     # Keep container running
