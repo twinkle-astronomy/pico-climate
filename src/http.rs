@@ -34,25 +34,25 @@ static METRICS: [MetricFamily; 5] = [
         &ADC_TEMP_SAMPLES,
     ),
     MetricFamily::new(
-        "sth30_reading",
-        "Reading from STH30 Sensor",
+        "sht30_reading",
+        "Reading from SHT30 Sensor",
         crate::prometheus::MetricType::Gauge,
         &["sensor"],
-        &STH30_SAMPLES,
+        &SHT30_SAMPLES,
     ),
     MetricFamily::new(
-        "sth30_status",
-        "STH30 Status Registers",
+        "sht30_status",
+        "SHT30 Status Registers",
         crate::prometheus::MetricType::Gauge,
         &["feature"],
-        &STH30_STATUSES,
+        &SHT30_STATUSES,
     ),
     MetricFamily::new(
-        "sth30_error",
-        "Errors reading from STH30 Sensor",
+        "sht30_error",
+        "Errors reading from SHT30 Sensor",
         crate::prometheus::MetricType::Counter,
         &[],
-        &STH30_ERRORS,
+        &SHT30_ERRORS,
     ),
 ];
 
@@ -64,12 +64,12 @@ static ADC_TEMP_SAMPLES: [prometheus::Sample; 3] = [
     prometheus::Sample::new(&["raw"], 0.),
 ];
 
-static STH30_SAMPLES: [prometheus::Sample; 2] = [
+static SHT30_SAMPLES: [prometheus::Sample; 2] = [
     prometheus::Sample::new(&["temperature"], 0.),
     prometheus::Sample::new(&["humidity"], 0.),
 ];
 
-static STH30_STATUSES: [prometheus::Sample; 5] = [
+static SHT30_STATUSES: [prometheus::Sample; 5] = [
     prometheus::Sample::new(&["heater_status"], 0.),
     prometheus::Sample::new(&["humidity_tracking_alert"], 0.),
     prometheus::Sample::new(&["temperature_tracking_alert"], 0.),
@@ -77,7 +77,7 @@ static STH30_STATUSES: [prometheus::Sample; 5] = [
     prometheus::Sample::new(&["write_data_checksum_status"], 0.),
 ];
 
-static STH30_ERRORS: [prometheus::Sample; 1] = [prometheus::Sample::new(&[], 0.)];
+static SHT30_ERRORS: [prometheus::Sample; 1] = [prometheus::Sample::new(&[], 0.)];
 
 async fn metrics(
     picoserve::extract::State(app_state): picoserve::extract::State<AppState>,
@@ -106,18 +106,18 @@ async fn metrics(
             command_status_success,
             write_data_checksum_status,
         }) => {
-            STH30_SAMPLES[0].set(temperature);
-            STH30_SAMPLES[1].set(humidity);
+            SHT30_SAMPLES[0].set(temperature);
+            SHT30_SAMPLES[1].set(humidity);
 
-            STH30_STATUSES[0].set(if heater_status { 1. } else { 0. });
-            STH30_STATUSES[1].set(if humidity_tracking_alert { 1. } else { 0. });
-            STH30_STATUSES[2].set(if temperature_tracking_alert { 1. } else { 0. });
-            STH30_STATUSES[3].set(if command_status_success { 1. } else { 0. });
-            STH30_STATUSES[4].set(if write_data_checksum_status { 1. } else { 0. });
+            SHT30_STATUSES[0].set(if heater_status { 1. } else { 0. });
+            SHT30_STATUSES[1].set(if humidity_tracking_alert { 1. } else { 0. });
+            SHT30_STATUSES[2].set(if temperature_tracking_alert { 1. } else { 0. });
+            SHT30_STATUSES[3].set(if command_status_success { 1. } else { 0. });
+            SHT30_STATUSES[4].set(if write_data_checksum_status { 1. } else { 0. });
         }
         Err(e) => {
             error!("Got error reading i2c: {:?}", e);
-            STH30_ERRORS[0].incr(1.);
+            SHT30_ERRORS[0].incr(1.);
         }
     }
 

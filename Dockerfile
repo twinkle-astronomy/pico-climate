@@ -12,6 +12,8 @@ RUN apt-get update && apt-get install -y \
 
 # Install ARM Cortex-M target
 RUN rustup target add thumbv6m-none-eabi
+RUN rustup target add thumbv8m.main-none-eabihf
+
 
 # Install additional components
 RUN rustup component add llvm-tools-preview

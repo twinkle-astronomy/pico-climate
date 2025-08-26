@@ -6,26 +6,26 @@ Provides the following metrics
 ```
 # HELP http_request_count Number of http requests recieved
 # TYPE http_request_count counter
-http_request_count{} 2
+http_request_count{} 14
 # HELP adc_temp_sensor Value of onboard temp sensor
 # TYPE adc_temp_sensor gauge
 adc_temp_sensor{unit="C"} 28.847847
 adc_temp_sensor{unit="volts"} 0.7028198
 adc_temp_sensor{unit="raw"} 875
-# HELP sth30_reading Reading from STH30 Sensor
-# TYPE sth30_reading gauge
-sth30_reading{sensor="temperature"} 23.194855
-sth30_reading{sensor="humidity"} 45.282673
-# HELP sth30_status STH30 Status Registers
-# TYPE sth30_status gauge
-sth30_status{feature="heater_status"} 0
-sth30_status{feature="humidity_tracking_alert"} 0
-sth30_status{feature="temperature_tracking_alert"} 0
-sth30_status{feature="command_status_success"} 0
-sth30_status{feature="write_data_checksum_status"} 0
-# HELP sth30_error Errors reading from STH30 Sensor
-# TYPE sth30_error counter
-sth30_error{} 0
+# HELP sht30_reading Reading from SHT30 Sensor
+# TYPE sht30_reading gauge
+sht30_reading{sensor="temperature"} 23.24826
+sht30_reading{sensor="humidity"} 42.18204
+# HELP sht30_status SHT30 Status Registers
+# TYPE sht30_status gauge
+sht30_status{feature="heater_status"} 0
+sht30_status{feature="humidity_tracking_alert"} 0
+sht30_status{feature="temperature_tracking_alert"} 0
+sht30_status{feature="command_status_success"} 0
+sht30_status{feature="write_data_checksum_status"} 0
+# HELP sht30_error Errors reading from SHT30 Sensor
+# TYPE sht30_error counter
+sht30_error{} 0
 ```
 
 ## Prerequisites
