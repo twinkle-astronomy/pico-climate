@@ -137,7 +137,6 @@ async fn main(spawner: Spawner) {
     static WEB_STACK: StaticCell<Stack<'_>> = StaticCell::new();
     let stack = WEB_STACK.init(stack);
 
-
     static APP_STATE: StaticCell<AppState> = StaticCell::new();
     let app_state = APP_STATE.init(AppState::new(temp_sensor, i2c).await.unwrap());
 

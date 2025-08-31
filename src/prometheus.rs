@@ -3,8 +3,8 @@ use picoserve::response::chunked::{ChunkWriter, Chunks, ChunksWritten};
 use defmt_rtt as _;
 use portable_atomic::{AtomicF32, Ordering::SeqCst};
 
-pub struct MetricsResponse {
-    metric_families: &'static [MetricFamily],
+pub struct MetricsResponse<T: IntoIterator<Item = MetricFamily>> {
+    metric_families: T,
 }
 
 pub struct MetricFamily {
@@ -68,14 +68,14 @@ impl MetricFamily {
     }
 }
 
-impl MetricsResponse {
-    pub fn new(metric_families: &'static [MetricFamily]) -> Self {
+impl<T: IntoIterator<Item = MetricFamily>> MetricsResponse<T> {
+    pub fn new(metric_families: T) -> Self {
         MetricsResponse { metric_families }
     }
 }
 
 // Implement Chunks for ResponseList to enable streaming
-impl Chunks for MetricsResponse {
+impl<T: IntoIterator<Item = MetricFamily>> Chunks for MetricsResponse<T> {
     fn content_type(&self) -> &'static str {
         "text/plain; version=0.0.4; charset=utf-8; escaping=underscores"
     }
@@ -85,7 +85,7 @@ impl Chunks for MetricsResponse {
         mut chunk_writer: ChunkWriter<W>,
     ) -> Result<ChunksWritten, W::Error> {
         // Write each value as a separate chunk
-        for metric_family in self.metric_families.as_ref().iter() {
+        for metric_family in self.metric_families {
             write!(
                 chunk_writer,
                 "# HELP {} {}\n",

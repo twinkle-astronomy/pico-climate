@@ -1,3 +1,5 @@
+use core::ops::Deref;
+
 use defmt::{error, info};
 use embassy_net::Stack;
 use embassy_rp::i2c::{Async, I2c};
@@ -17,44 +19,6 @@ const SHT30_ADDR: u16 = 0x44;
 const SHT30_HIG_REP_CLOCK_STRETCH_READ: [u8; 2] = [0x2C, 0x06];
 const SHT30_READ_STATUS: [u8; 2] = [0xF3, 0x2D];
 const SHT30_CLEAR_STATUS: [u8; 2] = [0x30, 0x41];
-
-static METRICS: [MetricFamily; 5] = [
-    MetricFamily::new(
-        "http_request_count",
-        "Number of http requests recieved",
-        crate::prometheus::MetricType::Counter,
-        &[],
-        &COUNTER_SAMPLES,
-    ),
-    MetricFamily::new(
-        "adc_temp_sensor",
-        "Value of onboard temp sensor",
-        crate::prometheus::MetricType::Gauge,
-        &["unit"],
-        &ADC_TEMP_SAMPLES,
-    ),
-    MetricFamily::new(
-        "sht30_reading",
-        "Reading from SHT30 Sensor",
-        crate::prometheus::MetricType::Gauge,
-        &["sensor"],
-        &SHT30_SAMPLES,
-    ),
-    MetricFamily::new(
-        "sht30_status",
-        "SHT30 Status Registers",
-        crate::prometheus::MetricType::Gauge,
-        &["feature"],
-        &SHT30_STATUSES,
-    ),
-    MetricFamily::new(
-        "sht30_error",
-        "Errors reading from SHT30 Sensor",
-        crate::prometheus::MetricType::Counter,
-        &[],
-        &SHT30_ERRORS,
-    ),
-];
 
 static COUNTER_SAMPLES: [prometheus::Sample; 1] = [prometheus::Sample::new(&[], 0.)];
 
@@ -77,7 +41,38 @@ static SHT30_STATUSES: [prometheus::Sample; 5] = [
     prometheus::Sample::new(&["write_data_checksum_status"], 0.),
 ];
 
+static INA237_SAMPLES: [prometheus::Sample; 5] = [
+    prometheus::Sample::new(&["bus_voltage"], 0.),
+    prometheus::Sample::new(&["shunt_voltage"], 0.),
+    prometheus::Sample::new(&["current"], 0.),
+    prometheus::Sample::new(&["power"], 0.),
+    prometheus::Sample::new(&["die_temperature"], 0.),
+];
+
 static SHT30_ERRORS: [prometheus::Sample; 1] = [prometheus::Sample::new(&[], 0.)];
+
+struct OptionalChain<T, S> {
+    base_metrics: T,
+    optional_metrics: Option<S>,
+}
+
+impl<T, S> Iterator for OptionalChain<T, S>
+where
+    T: Iterator<Item = MetricFamily>,
+    S: Iterator<Item = MetricFamily>,
+{
+    type Item = MetricFamily;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        match self.base_metrics.next() {
+            Some(n) => Some(n),
+            None => match &mut self.optional_metrics {
+                Some(m) => m.next(),
+                None => None,
+            },
+        }
+    }
+}
 
 async fn metrics(
     picoserve::extract::State(app_state): picoserve::extract::State<AppState>,
@@ -96,7 +91,7 @@ async fn metrics(
     ADC_TEMP_SAMPLES[1].set(adc_sample.volt);
     ADC_TEMP_SAMPLES[2].set(adc_sample.raw as f32);
 
-    match app_state_lock.read_i2c().await {
+    match app_state_lock.read_i2c_sht30().await {
         Ok(I2CReading {
             temperature,
             humidity,
@@ -121,7 +116,70 @@ async fn metrics(
         }
     }
 
-    ChunkedResponse::new(MetricsResponse::new(&METRICS))
+    let metrics = [
+        MetricFamily::new(
+            "http_request_count",
+            "Number of http requests recieved",
+            crate::prometheus::MetricType::Counter,
+            &[],
+            &COUNTER_SAMPLES,
+        ),
+        MetricFamily::new(
+            "adc_temp_sensor",
+            "Value of onboard temp sensor",
+            crate::prometheus::MetricType::Gauge,
+            &["unit"],
+            &ADC_TEMP_SAMPLES,
+        ),
+        MetricFamily::new(
+            "sht30_reading",
+            "Reading from SHT30 Sensor",
+            crate::prometheus::MetricType::Gauge,
+            &["sensor"],
+            &SHT30_SAMPLES,
+        ),
+        MetricFamily::new(
+            "sht30_status",
+            "SHT30 Status Registers",
+            crate::prometheus::MetricType::Gauge,
+            &["feature"],
+            &SHT30_STATUSES,
+        ),
+        MetricFamily::new(
+            "sht30_error",
+            "Errors reading from SHT30 Sensor",
+            crate::prometheus::MetricType::Counter,
+            &[],
+            &SHT30_ERRORS,
+        ),
+    ]
+    .into_iter();
+
+    let optional = if app_state_lock.has_ina237 {
+        if let Ok(reading) = app_state_lock.read_i2c_ina237().await {
+            INA237_SAMPLES[0].set(reading.bus_voltage);
+            INA237_SAMPLES[1].set(reading.shunt_voltage);
+            INA237_SAMPLES[2].set(reading.current);
+            INA237_SAMPLES[3].set(reading.power);
+            INA237_SAMPLES[4].set(reading.die_temperature);
+        }
+        Some(
+            [MetricFamily::new(
+                "ina237_reading",
+                "Reading from INA237 Sensor",
+                crate::prometheus::MetricType::Gauge,
+                &["sensor"],
+                &INA237_SAMPLES,
+            )]
+            .into_iter(),
+        )
+    } else {
+        None
+    };
+    ChunkedResponse::new(MetricsResponse::new(OptionalChain {
+        base_metrics: metrics,
+        optional_metrics: optional,
+    }))
 }
 
 #[derive(Clone, Copy)]
@@ -129,10 +187,47 @@ pub struct AppState {
     state: &'static Mutex<State>,
 }
 
-struct State {
+impl AppState {
+    pub async fn new(
+        adc_temp_sensor: &'static mut adc_temp_sensor::Sensor<'static>,
+        mut i2c: I2c<'static, I2C0, Async>,
+    ) -> Result<Self, embassy_rp::i2c::Error> {
+        i2c.write_async(SHT30_ADDR, [0x30, 0xA2]).await?;
+        static STATE: StaticCell<Mutex<State>> = StaticCell::new();
+        let state = STATE.init(Mutex::new(State {
+            count: 0,
+            adc_temp_sensor,
+            i2c,
+            has_ina237: false,
+        }));
+
+        {
+            let mut lock = state.lock().await;
+            match lock.init_i2c_ina237().await {
+                Ok(_) => {
+                    info!("Found INA237 Power Meter");
+                    lock.has_ina237 = true;
+                }
+                Err(e) => {
+                    error!("INA237 Power Meter NOT FOUND: {:?}", e);
+                }
+            }
+        }
+        Ok(AppState { state })
+    }
+}
+impl Deref for AppState {
+    type Target = Mutex<State>;
+    fn deref(&self) -> &Self::Target {
+        self.state
+    }
+}
+
+pub struct State {
     adc_temp_sensor: &'static mut adc_temp_sensor::Sensor<'static>,
     count: usize,
-    i2c: I2c<'static, I2C0, Async>,
+    pub i2c: I2c<'static, I2C0, Async>,
+    pub has_ina237: bool,
 }
 struct I2CReading {
     temperature: f32,
@@ -145,7 +240,7 @@ struct I2CReading {
 }
 
 impl State {
-    async fn read_i2c(&mut self) -> Result<I2CReading, embassy_rp::i2c::Error> {
+    async fn read_i2c_sht30(&mut self) -> Result<I2CReading, embassy_rp::i2c::Error> {
         self.i2c.write_async(SHT30_ADDR, SHT30_CLEAR_STATUS).await?;
         self.i2c
             .write_async(SHT30_ADDR, SHT30_HIG_REP_CLOCK_STRETCH_READ)
@@ -172,10 +267,10 @@ impl State {
 
         let status: u16 = ((buffer[0] as u16) << 8) | (buffer[1] as u16);
 
-        let heater_status = status              & 0b010000000000000 != 0;
-        let humidity_tracking_alert = status    & 0b000100000000000 != 0;
+        let heater_status = status & 0b010000000000000 != 0;
+        let humidity_tracking_alert = status & 0b000100000000000 != 0;
         let temperature_tracking_alert = status & 0b000010000000000 != 0;
-        let command_status_success = status     & 0b000000000000010 != 0;
+        let command_status_success = status & 0b000000000000010 != 0;
         let write_data_checksum_status = status & 0b000000000000001 != 0;
 
         Ok(I2CReading {
@@ -190,32 +285,11 @@ impl State {
     }
 }
 
-impl AppState {
-    pub async fn new(
-        adc_temp_sensor: &'static mut adc_temp_sensor::Sensor<'static>,
-        mut i2c: I2c<'static, I2C0, Async>,
-    ) -> Result<Self, embassy_rp::i2c::Error> {
-        i2c.write_async(SHT30_ADDR, [0x30, 0xA2]).await?;
-        static STATE: StaticCell<Mutex<State>> = StaticCell::new();
-        let state = STATE.init(Mutex::new(State {
-            count: 0,
-            adc_temp_sensor,
-            i2c,
-        }));
-
-        Ok(AppState { state })
-    }
-}
-
 #[embassy_executor::task(pool_size = 16)]
-pub async fn web_task(
-    id: usize,
-    stack: &'static Stack<'static>,
-    app_state: &'static AppState,
-) {
+pub async fn web_task(id: usize, stack: &'static Stack<'static>, app_state: &'static AppState) {
     let app = picoserve::Router::new().route("/metrics", get(metrics));
 
-    if let Err(e) = app_state.state.lock().await.read_i2c().await {
+    if let Err(e) = app_state.state.lock().await.read_i2c_sht30().await {
         error!("Got error reading i2c: {:?}", e);
     }
 
