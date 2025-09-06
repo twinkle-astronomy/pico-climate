@@ -7,6 +7,7 @@ use embassy_executor::Spawner;
 use embassy_rp::adc::{Adc, Channel};
 use embassy_rp::i2c::{self, I2c};
 use embassy_rp::peripherals::{DMA_CH0, I2C0, PIO0};
+use embassy_rp::watchdog::Watchdog;
 use embassy_rp::{
     bind_interrupts,
     gpio::{Level, Output},
@@ -138,7 +139,13 @@ async fn main(spawner: Spawner) {
     let stack = WEB_STACK.init(stack);
 
     static APP_STATE: StaticCell<AppState> = StaticCell::new();
-    let app_state = APP_STATE.init(AppState::new(temp_sensor, i2c).await.unwrap());
+
+    let watchdog = Watchdog::new(p.WATCHDOG);
+    let app_state = APP_STATE.init(
+        AppState::new(temp_sensor, i2c, watchdog, spawner.clone())
+            .await
+            .unwrap(),
+    );
 
     for id in 0..16 {
         spawner.must_spawn(web_task(id, stack, app_state));

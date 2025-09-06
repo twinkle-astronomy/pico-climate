@@ -80,8 +80,8 @@ impl State {
         // Check device ID
         let device_id = self.read_register(INA237_REG_DEVICE_ID).await?;
         let manuf_id = self.read_register(INA237_REG_MANUFACTURER_ID).await?;
-        info!("manuf_id: {}", manuf_id);
-        info!("device_id: {}", device_id);
+        // info!("manuf_id: {}", manuf_id);
+        // info!("device_id: {}", device_id);
         if manuf_id != 21577 && (device_id != 9072 || device_id != 9089 || device_id != 9104) {
             Timer::after_millis(100).await;
             return Err(Ina237Error::InvalidDeviceId);
@@ -126,15 +126,15 @@ impl State {
         Ok(())
     }
     pub async fn read_i2c_ina237(&mut self) -> Result<Reading, Ina237Error> {
-        info!("READING INA23x");
-        info!("read_bus_voltage: {}", self.read_bus_voltage().await);
-        info!("read_shunt_voltage: {}", self.read_shunt_voltage().await);
-        info!("read_current: {}", self.read_current().await);
-        info!("read_power: {}", self.read_power().await);
-        info!(
-            "read_die_temperature: {}",
-            self.read_die_temperature().await
-        );
+        // info!("READING INA23x");
+        // info!("read_bus_voltage: {}", self.read_bus_voltage().await);
+        // info!("read_shunt_voltage: {}", self.read_shunt_voltage().await);
+        // info!("read_current: {}", self.read_current().await);
+        // info!("read_power: {}", self.read_power().await);
+        // info!(
+        //     "read_die_temperature: {}",
+        //     self.read_die_temperature().await
+        // );
         Ok(Reading {
             bus_voltage: self.read_bus_voltage().await?,
             shunt_voltage: self.read_shunt_voltage().await?,
