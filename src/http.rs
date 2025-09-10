@@ -6,7 +6,6 @@ use embassy_net::Stack;
 use embassy_rp::i2c::{Async, I2c};
 use embassy_rp::peripherals::I2C0;
 use embassy_rp::watchdog::Watchdog;
-use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
 use embassy_time::{Duration, Instant, Timer};
 use picoserve::response::chunked::ChunkedResponse;
 use picoserve::response::IntoResponse;
@@ -251,6 +250,7 @@ impl AppState {
             adc_temp_sensor,
             i2c,
             has_ina237: false,
+            ina_state: InaState::new(),
         }));
 
         {
@@ -274,12 +274,26 @@ impl Deref for AppState {
         self.state
     }
 }
+pub struct InaState {
+    pub device_start_time: Instant,
+    pub last_reading_time: Option<Instant>,
+}
+
+impl InaState {
+    pub fn new() -> Self {
+        InaState {
+            device_start_time: Instant::now(),
+            last_reading_time: None,
+        }
+    }
+}
 
 pub struct State {
     adc_temp_sensor: &'static mut adc_temp_sensor::Sensor<'static>,
     count: usize,
     pub i2c: I2c<'static, I2C0, Async>,
     pub has_ina237: bool,
+    pub ina_state: InaState,
 }
 struct I2CReading {
     temperature: f32,
