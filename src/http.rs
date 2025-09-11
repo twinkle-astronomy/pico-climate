@@ -172,9 +172,9 @@ async fn metrics(
         Some(
             [MetricFamily::new(
                 "ina237_reading",
-                "Reading from INA237 Sensor",
+                "register values from INA237 Sensor",
                 crate::prometheus::MetricType::Gauge,
-                &["sensor"],
+                &["register"],
                 &INA237_SAMPLES,
             )]
             .into_iter(),
@@ -250,7 +250,6 @@ impl AppState {
             adc_temp_sensor,
             i2c,
             has_ina237: false,
-            ina_state: InaState::new(),
         }));
 
         {
@@ -274,26 +273,12 @@ impl Deref for AppState {
         self.state
     }
 }
-pub struct InaState {
-    pub device_start_time: Instant,
-    pub last_reading_time: Option<Instant>,
-}
-
-impl InaState {
-    pub fn new() -> Self {
-        InaState {
-            device_start_time: Instant::now(),
-            last_reading_time: None,
-        }
-    }
-}
 
 pub struct State {
     adc_temp_sensor: &'static mut adc_temp_sensor::Sensor<'static>,
     count: usize,
     pub i2c: I2c<'static, I2C0, Async>,
     pub has_ina237: bool,
-    pub ina_state: InaState,
 }
 struct I2CReading {
     temperature: f32,

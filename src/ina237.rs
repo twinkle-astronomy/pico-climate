@@ -6,28 +6,18 @@ use embassy_time::Timer;
 
 // INA237 Register Addresses
 const INA237_REG_CONFIG: u8 = 0x00;
+const INA237_REG_ADC_CONFIG: u8 = 0x01;
+const INA237_REG_SHUNT_CAL: u8 = 0x02;
 const INA237_REG_SHUNT_VOLTAGE: u8 = 0x01;
 const INA237_REG_BUS_VOLTAGE: u8 = 0x02;
 const INA237_REG_POWER: u8 = 0x03;
 const INA237_REG_CURRENT: u8 = 0x04;
-const INA237_REG_CALIBRATION: u8 = 0x05;
 const INA237_REG_DIE_TEMP: u8 = 0x06;
 const INA237_REG_ENERGY: u8 = 0x08; // Energy register for accumulation
 const INA237_REG_CHARGE: u8 = 0x09; // Charge register for accumulation
                                     // const INA237_REG_ALERT_LIMIT: u8 = 0x07;
 const INA237_REG_MANUFACTURER_ID: u8 = 0x3E;
 const INA237_REG_DEVICE_ID: u8 = 0x3F;
-
-// Configuration register bits
-const INA237_CONFIG_RST: u16 = 0x8000;
-const INA237_CONFIG_RSTACC: u16 = 0x4000; // Reset accumulation registers
-const INA237_CONFIG_ADC_RANGE: u16 = 0x0010;
-
-const INA237_CONVDLY_2MS: u16 = 0x0040;
-
-// ADC configuration bits
-const INA237_ADC_256_SAMPLES: u16 = 0x9; // 256 samples averaged
-const INA237_MODE_ALL_TRIG: u16 = 0x7;
 
 // Default I2C address
 const INA237_DEFAULT_ADDR: u8 = 0x40;
@@ -45,8 +35,8 @@ impl From<Error> for Ina237Error {
     }
 }
 
-const MAX_EXPECTED_CURRENT: f32 = 10.0; // Amperes
-const CURRENT_LSB: f32 = MAX_EXPECTED_CURRENT / 32768.0;
+const MAX_EXPECTED_CURRENT: f32 = 1.0;
+const CURRENT_LSB: f32 = MAX_EXPECTED_CURRENT / (1<<15) as f32;
 const POWER_LSB: f32 = 3.2 * CURRENT_LSB;
 
 pub struct Reading {
@@ -67,29 +57,34 @@ impl State {
         // info!("manuf_id: {}", manuf_id);
         // info!("device_id: {}", device_id);
         if manuf_id != 21577 && (device_id != 9072 || device_id != 9089 || device_id != 9104) {
-            Timer::after_millis(100).await;
             return Err(Ina237Error::InvalidDeviceId);
         }
 
         // Reset device and accumulation registers
-        self.write_register(INA237_REG_CONFIG, INA237_CONFIG_RST | INA237_CONFIG_RSTACC)
-            .await?;
+        self.write_register(INA237_REG_CONFIG, 1  << 15).await?;
         Timer::after_millis(10).await;
 
-        // Configure device with hardware averaging
-        let config = INA237_CONFIG_ADC_RANGE | // ±163.84 mV range
-                    INA237_CONVDLY_2MS | // 2ms conversion delay for stability
-                    (INA237_ADC_256_SAMPLES << 7) | // Bus voltage ADC: 256 samples averaged
-                    (INA237_ADC_256_SAMPLES << 3) | // Shunt voltage ADC: 256 samples averaged
-                    INA237_MODE_ALL_TRIG; // Continuous shunt, bus, and temperature
+        // Configure device with hardware averaging - try without ADC_RANGE bit
+        // let config = // INA237_CONFIG_ADC_RANGE | // Try ±40.96 mV range instead  
+        //             INA237_CONVDLY_510MS << 6 | // 2ms conversion delay for stability
+        //             (INA237_ADC_256_SAMPLES << 7) | // Bus voltage ADC: 256 samples averaged
+        //             (INA237_ADC_256_SAMPLES << 3) | // Shunt voltage ADC: 256 samples averaged
+        //             INA237_MODE_ALL_TRIG; // Continuous shunt, bus, and temperature
 
+        let shunt_resistance = 0.015;  // 15mΩ - from spec sheet
+        let config = (819.2e6 * CURRENT_LSB * shunt_resistance) as u16;
+        // let config: u16 = 0xff << 6 | 1 << 4;
+        info!("config: {}", config);
         self.write_register(INA237_REG_CONFIG, config).await?;
 
-        self.calibrate().await?;
+        let config: u16 = 0x7<<12 | 
+            0x7 << 9 | 
+            0x7 << 7 | 
+            0x7 << 3;
+        self.write_register(INA237_REG_ADC_CONFIG, config).await?;
+        // self.calibrate().await?;
 
-        // Initialize the INA state
-        // You'll need to add an ina_state field to your State struct
-        // self.ina_state = InaState::new();
+        self.write_register(INA237_REG_SHUNT_CAL, (819.2e6 * CURRENT_LSB * 0.015) as u16).await?;
 
         if let Err(e) = self.read_i2c_ina237().await {
             error!("Error reading from ina237: {:?}", e);
@@ -98,31 +93,23 @@ impl State {
         Ok(())
     }
 
-    async fn calibrate(&mut self) -> Result<(), Ina237Error> {
-        // Calculate calibration register value
-        // CAL = 13107.2 × 10^6 × CURRENT_LSB × R_SHUNT
-        let shunt_resistance = 0.1;
-        let cal_value = (13107200.0 * CURRENT_LSB * shunt_resistance) as u16;
-
-        if cal_value == 0 {
-            return Err(Ina237Error::CalibrationError);
-        }
-
-        // Write calibration register
-        self.write_register(INA237_REG_CALIBRATION, cal_value)
-            .await?;
-
-        Ok(())
-    }
-
     // Keep original method for compatibility
     pub async fn read_i2c_ina237(&mut self) -> Result<Reading, Ina237Error> {
         info!("READING INA23x");
+
+
+        let config: u16 = 0x7<<12 | 
+            0x7 << 9 | 
+            0x7 << 7 | 
+            0x7 << 3;
+        self.write_register(INA237_REG_ADC_CONFIG, config).await?;
+
+
         let bus_voltage = self.read_bus_voltage().await?;
         let shunt_voltage = self.read_shunt_voltage().await?;
         let current = self.read_current().await?;
         let power = self.read_power().await?;
-        let temperature = self.read_die_temperature().await?;
+        let die_temperature = self.read_die_temperature().await?;
         let energy = self.read_energy().await?;
         let charge = self.read_charge().await?;
 
@@ -130,14 +117,16 @@ impl State {
         info!("read_shunt_voltage: {}", shunt_voltage);
         info!("read_current: {}", current);
         info!("read_power: {}", power);
-        info!("read_die_temperature: {}", temperature);
+        info!("read_die_temperature: {}", die_temperature);
+        info!("read_energy: {}", energy);
+        info!("read_charge: {}", charge);
 
         Ok(Reading {
             bus_voltage,
             shunt_voltage,
             current,
             power,
-            die_temperature: temperature,
+            die_temperature,
             energy,
             charge,
         })
@@ -146,15 +135,17 @@ impl State {
     pub async fn read_bus_voltage(&mut self) -> Result<f32, Ina237Error> {
         let raw_voltage = self.read_register(INA237_REG_BUS_VOLTAGE).await?;
         // Bus voltage LSB = 3.125 mV (with ADC range bit set)
-        let voltage = (raw_voltage as f32) * 0.003125;
+        let voltage = (raw_voltage as f32) * 0.034133333333333335;
         Ok(voltage)
     }
 
     pub async fn read_shunt_voltage(&mut self) -> Result<f32, Ina237Error> {
         let raw_voltage = self.read_register(INA237_REG_SHUNT_VOLTAGE).await? as i16;
-        // Shunt voltage LSB = 5 μV (with ADC range bit set)
-        let voltage = (raw_voltage as f32) * 0.000005;
-        Ok(voltage)
+        
+        info!("raw_shunt_voltage: {}", raw_voltage);
+        
+        // Return raw value as float
+        Ok(raw_voltage as f32)
     }
 
     pub async fn read_current(&mut self) -> Result<f32, Ina237Error> {
