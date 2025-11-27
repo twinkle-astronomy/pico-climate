@@ -1,12 +1,10 @@
 use core::ops::Deref;
 
-use defmt::{debug, error, info, warn};
-use embassy_executor::Spawner;
+use defmt::{error, info};
 use embassy_net::Stack;
 use embassy_rp::i2c::{Async, I2c};
 use embassy_rp::peripherals::I2C0;
-use embassy_rp::watchdog::Watchdog;
-use embassy_time::{Duration, Instant, Timer};
+use embassy_time::{Duration, Instant};
 use picoserve::response::chunked::ChunkedResponse;
 use picoserve::response::IntoResponse;
 use picoserve::routing::get;
@@ -16,6 +14,8 @@ use static_cell::StaticCell;
 
 use crate::prometheus::{self, MetricFamily, MetricsResponse};
 use crate::{adc_temp_sensor, Mutex};
+
+pub static LAST_REQUEST_TIME: Mutex<Instant> = Mutex::new(Instant::MIN);
 
 const SHT30_ADDR: u16 = 0x44;
 const SHT30_HIG_REP_CLOCK_STRETCH_READ: [u8; 2] = [0x2C, 0x06];
@@ -82,7 +82,7 @@ async fn metrics(
     info!("GET /metrics");
     {
         let mut last_req = LAST_REQUEST_TIME.lock().await;
-        *last_req = Some(Instant::now());
+        *last_req = Instant::now();
     }
 
     // Update request count and metric
@@ -193,56 +193,13 @@ pub struct AppState {
     state: &'static Mutex<State>,
 }
 
-static LAST_REQUEST_TIME: Mutex<Option<Instant>> = Mutex::new(None);
-
-#[embassy_executor::task]
-async fn watchdog_feeder(mut watchdog: Watchdog) {
-    // Start hardware watchdog with max timeout (~8 seconds)
-    watchdog.start(Duration::from_secs(5));
-
-    loop {
-        Timer::after(Duration::from_secs(1)).await; // Feed every 1 seconds
-
-        // Check if we've had a recent HTTP request
-        let should_reset = {
-            let last_req = LAST_REQUEST_TIME.lock().await;
-            match *last_req {
-                Some(time) => time.elapsed() > Duration::from_secs(120), // 2 minutes
-                None => false, // No requests yet, don't reset immediately
-            }
-        };
-
-        if should_reset {
-            // Don't feed the watchdog, let it reset the system
-            warn!("No HTTP requests for 2 minutes, letting watchdog reset system");
-            loop {
-                Timer::after(Duration::from_secs(10)).await;
-                // Just wait for hardware watchdog to trigger reset
-            }
-        } else {
-            debug!("Feeding the watchdog");
-            // Feed the watchdog to keep system alive
-            watchdog.feed();
-        }
-    }
-}
 
 impl AppState {
     pub async fn new(
         adc_temp_sensor: &'static mut adc_temp_sensor::Sensor<'static>,
         mut i2c: I2c<'static, I2C0, Async>,
-        watchdog: Watchdog,
-        spawner: Spawner,
     ) -> Result<Self, embassy_rp::i2c::Error> {
         i2c.write_async(SHT30_ADDR, [0x30, 0xA2]).await?;
-
-        // Set initial request time to now to prevent immediate reset
-        {
-            let mut last_req = LAST_REQUEST_TIME.lock().await;
-            *last_req = Some(Instant::now());
-        }
-
-        spawner.spawn(watchdog_feeder(watchdog)).unwrap();
 
         static STATE: StaticCell<Mutex<State>> = StaticCell::new();
         let state = STATE.init(Mutex::new(State {

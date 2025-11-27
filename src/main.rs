@@ -16,14 +16,14 @@ use embassy_rp::{
 use embassy_time::{Duration, Timer};
 use panic_probe as _;
 use pico_climate::adc_temp_sensor;
-use pico_climate::http::{web_task, AppState};
+use pico_climate::http::{web_task, AppState, LAST_REQUEST_TIME};
 use static_cell::StaticCell;
 
 use core::fmt::Write;
 use embassy_net::{Config as NetConfig, DhcpConfig, Stack};
 use embassy_rp::clocks::RoscRng;
 
-use defmt::{self as _, info};
+use defmt::{self as _, debug, info};
 use defmt_rtt as _;
 
 bind_interrupts!(struct Irqs {
@@ -57,10 +57,27 @@ fn create_unique_hostname(uid: [u8; 8]) -> heapless::String<32> {
     hostname
 }
 
+#[embassy_executor::task]
+async fn watchdog_feeder(mut watchdog: Watchdog) {
+    // Require a request in the last 2 minutes.
+    loop {
+        let elapsed  = LAST_REQUEST_TIME.lock().await.elapsed();
+        info!("elapsed: {}", elapsed);
+        if elapsed < Duration::from_secs(120) {
+            debug!("Feeding the watchdog");
+            watchdog.feed();
+        }
+        Timer::after(Duration::from_secs(1)).await;
+    }
+}
+
 #[embassy_executor::main]
 async fn main(spawner: Spawner) {
     let p = embassy_rp::init(Default::default());
-
+    let mut watchdog = Watchdog::new(p.WATCHDOG);
+    watchdog.start(Duration::from_secs(5));
+    spawner.spawn(watchdog_feeder(watchdog)).unwrap();
+    
     //Onboard temp sensor
     let adc = Adc::new(p.ADC, Irqs, embassy_rp::adc::Config::default());
     let temp_sensor = Channel::new_temp_sensor(p.ADC_TEMP_SENSOR);
@@ -140,9 +157,8 @@ async fn main(spawner: Spawner) {
 
     static APP_STATE: StaticCell<AppState> = StaticCell::new();
 
-    let watchdog = Watchdog::new(p.WATCHDOG);
     let app_state = APP_STATE.init(
-        AppState::new(temp_sensor, i2c, watchdog, spawner.clone())
+        AppState::new(temp_sensor, i2c)
             .await
             .unwrap(),
     );
