@@ -12,67 +12,130 @@ use picoserve::routing::get;
 use defmt_rtt as _;
 use static_cell::StaticCell;
 
-use crate::prometheus::{self, MetricFamily, MetricsResponse};
+use crate::prometheus::{counter, gauge, Histogram, MetricsResponse, Sample, WriteMetric};
 use crate::{adc_temp_sensor, Mutex};
 
 pub static LAST_REQUEST_TIME: Mutex<Instant> = Mutex::new(Instant::MIN);
+
+pub static WIFI_RSSI_STRENGTH: Mutex<Histogram<10>> = Mutex::new(Histogram::new([10., 20., 30., 40., 50., 60., 70.,80.,90.,100.]));
 
 const SHT30_ADDR: u16 = 0x44;
 const SHT30_HIG_REP_CLOCK_STRETCH_READ: [u8; 2] = [0x2C, 0x06];
 const SHT30_READ_STATUS: [u8; 2] = [0xF3, 0x2D];
 const SHT30_CLEAR_STATUS: [u8; 2] = [0x30, 0x41];
 
-static COUNTER_SAMPLES: [prometheus::Sample; 1] = [prometheus::Sample::new(&[], 0.)];
-
-static ADC_TEMP_SAMPLES: [prometheus::Sample; 3] = [
-    prometheus::Sample::new(&["C"], 0.),
-    prometheus::Sample::new(&["volts"], 0.),
-    prometheus::Sample::new(&["raw"], 0.),
-];
-
-static SHT30_SAMPLES: [prometheus::Sample; 2] = [
-    prometheus::Sample::new(&["temperature"], 0.),
-    prometheus::Sample::new(&["humidity"], 0.),
-];
-
-static SHT30_STATUSES: [prometheus::Sample; 5] = [
-    prometheus::Sample::new(&["heater_status"], 0.),
-    prometheus::Sample::new(&["humidity_tracking_alert"], 0.),
-    prometheus::Sample::new(&["temperature_tracking_alert"], 0.),
-    prometheus::Sample::new(&["command_status_success"], 0.),
-    prometheus::Sample::new(&["write_data_checksum_status"], 0.),
-];
-
-static INA237_SAMPLES: [prometheus::Sample; 5] = [
-    prometheus::Sample::new(&["bus_voltage"], 0.),
-    prometheus::Sample::new(&["shunt_voltage"], 0.),
-    prometheus::Sample::new(&["current"], 0.),
-    prometheus::Sample::new(&["power"], 0.),
-    prometheus::Sample::new(&["die_temperature"], 0.),
-];
-
-static SHT30_ERRORS: [prometheus::Sample; 1] = [prometheus::Sample::new(&[], 0.)];
-
-struct OptionalChain<T, S> {
-    base_metrics: T,
-    optional_metrics: Option<S>,
+struct PicoClimateMetrics {
+    app_state: AppState,
 }
 
-impl<T, S> Iterator for OptionalChain<T, S>
-where
-    T: Iterator<Item = MetricFamily>,
-    S: Iterator<Item = MetricFamily>,
-{
-    type Item = MetricFamily;
+impl WriteMetric for PicoClimateMetrics {
+    async fn write_chunks<W>(
+        &self,
+        chunk_writer: &mut picoserve::response::chunked::ChunkWriter<W>,
+        
+    ) -> Result<(), W::Error>
+    where
+        W: picoserve::io::Write,
+    {
+        let mut app_state_lock = self.app_state.state.lock().await;
+        app_state_lock.count = app_state_lock.count + 1;
 
-    fn next(&mut self) -> Option<Self::Item> {
-        match self.base_metrics.next() {
-            Some(n) => Some(n),
-            None => match &mut self.optional_metrics {
-                Some(m) => m.next(),
-                None => None,
-            },
+        counter(
+            "http_request_count",
+            "Number of http requests recieved",
+            [],
+            [Sample::new([], app_state_lock.count as f32)],
+        ).write_chunks(chunk_writer).await?;
+
+
+        if let Ok(adc_sample) = app_state_lock.adc_temp_sensor.read().await {
+            gauge(
+                "adc_temp_sensor",
+                "Value of onboard temp sensor",
+                ["unit"],
+                [
+                    Sample::new(["C"], adc_sample.temp_celsius),
+                    Sample::new(["volts"], adc_sample.volt),
+                    Sample::new(["raw"], adc_sample.raw as f32),
+                ],
+            ).write_chunks(chunk_writer).await?;
         }
+
+        match app_state_lock.read_i2c_sht30().await {
+            Ok(I2CReading {
+                temperature,
+                humidity,
+                heater_status,
+                humidity_tracking_alert,
+                temperature_tracking_alert,
+                command_status_success,
+                write_data_checksum_status,
+            }) => {
+                gauge(
+                    "sht30_reading",
+                    "Reading from SHT30 Sensor",
+                    ["sensor"],
+                    [
+                        Sample::new(["temperature"], temperature),
+                        Sample::new(["humidity"], humidity),
+                    ],
+                ).write_chunks(chunk_writer).await?;
+                gauge(
+                    "sht30_status",
+                    "SHT30 Status Registers",
+                    ["feature"],
+                    [
+                        Sample::new(["heater_status"], if heater_status { 1. } else { 0. }),
+                        Sample::new(
+                            ["humidity_tracking_alert"],
+                            if humidity_tracking_alert { 1. } else { 0. },
+                        ),
+                        Sample::new(
+                            ["temperature_tracking_alert"],
+                            if temperature_tracking_alert { 1. } else { 0. },
+                        ),
+                        Sample::new(
+                            ["command_status_success"],
+                            if command_status_success { 1. } else { 0. },
+                        ),
+                        Sample::new(
+                            ["write_data_checksum_status"],
+                            if write_data_checksum_status { 1. } else { 0. },
+                        ),
+                    ],
+                ).write_chunks(chunk_writer).await?;
+            }
+            Err(e) => {
+                error!("Got error reading i2c: {:?}", e);
+                app_state_lock.sht30_errors += 1;
+            }
+        };
+        counter(
+            "sht30_error",
+            "Errors reading from SHT30 Sensor",
+            [],
+            [Sample::new([], app_state_lock.sht30_errors as f32)],
+        ).write_chunks(chunk_writer).await?;
+
+            
+        if app_state_lock.has_ina237 {
+            if let Ok(reading) = app_state_lock.read_i2c_ina237().await {
+                gauge(
+                    "ina237_reading",
+                    "register values from INA237 Sensor",
+                    ["register"],
+                    [
+                        Sample::new(["bus_voltage"], reading.bus_voltage),
+                        Sample::new(["shunt_voltage"], reading.shunt_voltage),
+                        Sample::new(["current"], reading.current),
+                        Sample::new(["power"], reading.power),
+                        Sample::new(["die_temperature"], reading.die_temperature),
+                    ],
+                ).write_chunks(chunk_writer).await?;
+            }
+        }
+
+        Ok(())
     }
 }
 
@@ -85,106 +148,8 @@ async fn metrics(
         *last_req = Instant::now();
     }
 
-    // Update request count and metric
-    let mut app_state_lock = app_state.state.lock().await;
-    app_state_lock.count = app_state_lock.count + 1;
-    COUNTER_SAMPLES[0].set(app_state_lock.count as f32);
-
-    // Update ADC tempurature sensor samples.
-    let adc_sample = app_state_lock.adc_temp_sensor.read().await.unwrap();
-
-    ADC_TEMP_SAMPLES[0].set(adc_sample.temp_celsius);
-    ADC_TEMP_SAMPLES[1].set(adc_sample.volt);
-    ADC_TEMP_SAMPLES[2].set(adc_sample.raw as f32);
-
-    match app_state_lock.read_i2c_sht30().await {
-        Ok(I2CReading {
-            temperature,
-            humidity,
-            heater_status,
-            humidity_tracking_alert,
-            temperature_tracking_alert,
-            command_status_success,
-            write_data_checksum_status,
-        }) => {
-            SHT30_SAMPLES[0].set(temperature);
-            SHT30_SAMPLES[1].set(humidity);
-
-            SHT30_STATUSES[0].set(if heater_status { 1. } else { 0. });
-            SHT30_STATUSES[1].set(if humidity_tracking_alert { 1. } else { 0. });
-            SHT30_STATUSES[2].set(if temperature_tracking_alert { 1. } else { 0. });
-            SHT30_STATUSES[3].set(if command_status_success { 1. } else { 0. });
-            SHT30_STATUSES[4].set(if write_data_checksum_status { 1. } else { 0. });
-        }
-        Err(e) => {
-            error!("Got error reading i2c: {:?}", e);
-            SHT30_ERRORS[0].incr(1.);
-        }
-    }
-
-    let metrics = [
-        MetricFamily::new(
-            "http_request_count",
-            "Number of http requests recieved",
-            crate::prometheus::MetricType::Counter,
-            &[],
-            &COUNTER_SAMPLES,
-        ),
-        MetricFamily::new(
-            "adc_temp_sensor",
-            "Value of onboard temp sensor",
-            crate::prometheus::MetricType::Gauge,
-            &["unit"],
-            &ADC_TEMP_SAMPLES,
-        ),
-        MetricFamily::new(
-            "sht30_reading",
-            "Reading from SHT30 Sensor",
-            crate::prometheus::MetricType::Gauge,
-            &["sensor"],
-            &SHT30_SAMPLES,
-        ),
-        MetricFamily::new(
-            "sht30_status",
-            "SHT30 Status Registers",
-            crate::prometheus::MetricType::Gauge,
-            &["feature"],
-            &SHT30_STATUSES,
-        ),
-        MetricFamily::new(
-            "sht30_error",
-            "Errors reading from SHT30 Sensor",
-            crate::prometheus::MetricType::Counter,
-            &[],
-            &SHT30_ERRORS,
-        ),
-    ]
-    .into_iter();
-
-    let optional = if app_state_lock.has_ina237 {
-        if let Ok(reading) = app_state_lock.read_i2c_ina237().await {
-            INA237_SAMPLES[0].set(reading.bus_voltage);
-            INA237_SAMPLES[1].set(reading.shunt_voltage);
-            INA237_SAMPLES[2].set(reading.current);
-            INA237_SAMPLES[3].set(reading.power);
-            INA237_SAMPLES[4].set(reading.die_temperature);
-        }
-        Some(
-            [MetricFamily::new(
-                "ina237_reading",
-                "register values from INA237 Sensor",
-                crate::prometheus::MetricType::Gauge,
-                &["register"],
-                &INA237_SAMPLES,
-            )]
-            .into_iter(),
-        )
-    } else {
-        None
-    };
-    ChunkedResponse::new(MetricsResponse::new(OptionalChain {
-        base_metrics: metrics,
-        optional_metrics: optional,
+    ChunkedResponse::new(MetricsResponse::new(PicoClimateMetrics {
+        app_state
     }))
 }
 
@@ -192,7 +157,6 @@ async fn metrics(
 pub struct AppState {
     state: &'static Mutex<State>,
 }
-
 
 impl AppState {
     pub async fn new(
@@ -205,6 +169,7 @@ impl AppState {
         let state = STATE.init(Mutex::new(State {
             count: 0,
             adc_temp_sensor,
+            sht30_errors: 0,
             i2c,
             has_ina237: false,
         }));
@@ -234,6 +199,7 @@ impl Deref for AppState {
 pub struct State {
     adc_temp_sensor: &'static mut adc_temp_sensor::Sensor<'static>,
     count: usize,
+    pub sht30_errors: usize,
     pub i2c: I2c<'static, I2C0, Async>,
     pub has_ina237: bool,
 }
