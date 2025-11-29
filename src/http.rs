@@ -12,12 +12,16 @@ use picoserve::routing::get;
 use defmt_rtt as _;
 use static_cell::StaticCell;
 
-use crate::prometheus::{counter, gauge, Histogram, MetricsResponse, Sample, WriteMetric};
+use crate::prometheus::{
+    counter, gauge, Histogram, MetricWriter, MetricsRender, MetricsResponse, Sample,
+};
 use crate::{adc_temp_sensor, Mutex};
 
 pub static LAST_REQUEST_TIME: Mutex<Instant> = Mutex::new(Instant::MIN);
 
-pub static WIFI_RSSI_STRENGTH: Mutex<Histogram<10>> = Mutex::new(Histogram::new([10., 20., 30., 40., 50., 60., 70.,80.,90.,100.]));
+pub static WIFI_RSSI_STRENGTH: Mutex<Histogram<10>> = Mutex::new(Histogram::new([
+    10., 20., 30., 40., 50., 60., 70., 80., 90., 100.,
+]));
 
 const SHT30_ADDR: u16 = 0x44;
 const SHT30_HIG_REP_CLOCK_STRETCH_READ: [u8; 2] = [0x2C, 0x06];
@@ -28,11 +32,10 @@ struct PicoClimateMetrics {
     app_state: AppState,
 }
 
-impl WriteMetric for PicoClimateMetrics {
+impl MetricsRender for PicoClimateMetrics {
     async fn write_chunks<W>(
         &self,
         chunk_writer: &mut picoserve::response::chunked::ChunkWriter<W>,
-        
     ) -> Result<(), W::Error>
     where
         W: picoserve::io::Write,
@@ -40,25 +43,28 @@ impl WriteMetric for PicoClimateMetrics {
         let mut app_state_lock = self.app_state.state.lock().await;
         app_state_lock.count = app_state_lock.count + 1;
 
-        counter(
-            "http_request_count",
-            "Number of http requests recieved",
-            [],
-            [Sample::new([], app_state_lock.count as f32)],
-        ).write_chunks(chunk_writer).await?;
-
+        chunk_writer
+            .write(counter(
+                "http_request_count",
+                "Number of http requests recieved",
+                [],
+                [Sample::new([], app_state_lock.count as f32)].iter(),
+            ))
+            .await?;
 
         if let Ok(adc_sample) = app_state_lock.adc_temp_sensor.read().await {
-            gauge(
-                "adc_temp_sensor",
-                "Value of onboard temp sensor",
-                ["unit"],
-                [
-                    Sample::new(["C"], adc_sample.temp_celsius),
-                    Sample::new(["volts"], adc_sample.volt),
-                    Sample::new(["raw"], adc_sample.raw as f32),
-                ],
-            ).write_chunks(chunk_writer).await?;
+            chunk_writer
+                .write(gauge(
+                    "adc_temp_sensor",
+                    "Value of onboard temp sensor",
+                    ["unit"],
+                    [
+                        Sample::new(["C"], adc_sample.temp_celsius),
+                        Sample::new(["volts"], adc_sample.volt),
+                        Sample::new(["raw"], adc_sample.raw as f32),
+                    ].iter(),
+                ))
+                .await?;
         }
 
         match app_state_lock.read_i2c_sht30().await {
@@ -71,67 +77,76 @@ impl WriteMetric for PicoClimateMetrics {
                 command_status_success,
                 write_data_checksum_status,
             }) => {
-                gauge(
-                    "sht30_reading",
-                    "Reading from SHT30 Sensor",
-                    ["sensor"],
-                    [
-                        Sample::new(["temperature"], temperature),
-                        Sample::new(["humidity"], humidity),
-                    ],
-                ).write_chunks(chunk_writer).await?;
-                gauge(
-                    "sht30_status",
-                    "SHT30 Status Registers",
-                    ["feature"],
-                    [
-                        Sample::new(["heater_status"], if heater_status { 1. } else { 0. }),
-                        Sample::new(
-                            ["humidity_tracking_alert"],
-                            if humidity_tracking_alert { 1. } else { 0. },
-                        ),
-                        Sample::new(
-                            ["temperature_tracking_alert"],
-                            if temperature_tracking_alert { 1. } else { 0. },
-                        ),
-                        Sample::new(
-                            ["command_status_success"],
-                            if command_status_success { 1. } else { 0. },
-                        ),
-                        Sample::new(
-                            ["write_data_checksum_status"],
-                            if write_data_checksum_status { 1. } else { 0. },
-                        ),
-                    ],
-                ).write_chunks(chunk_writer).await?;
+                chunk_writer
+                    .write(gauge(
+                        "sht30_reading",
+                        "Reading from SHT30 Sensor",
+                        ["sensor"],
+                        [
+                            Sample::new(["temperature"], temperature),
+                            Sample::new(["humidity"], humidity),
+                        ].iter(),
+                    ))
+                    .await?;
+
+                chunk_writer
+                    .write(gauge(
+                        "sht30_status",
+                        "SHT30 Status Registers",
+                        ["feature"],
+                        [
+                            Sample::new(["heater_status"], if heater_status { 1. } else { 0. }),
+                            Sample::new(
+                                ["humidity_tracking_alert"],
+                                if humidity_tracking_alert { 1. } else { 0. },
+                            ),
+                            Sample::new(
+                                ["temperature_tracking_alert"],
+                                if temperature_tracking_alert { 1. } else { 0. },
+                            ),
+                            Sample::new(
+                                ["command_status_success"],
+                                if command_status_success { 1. } else { 0. },
+                            ),
+                            Sample::new(
+                                ["write_data_checksum_status"],
+                                if write_data_checksum_status { 1. } else { 0. },
+                            ),
+                        ].iter(),
+                    ))
+                    .await?;
             }
             Err(e) => {
                 error!("Got error reading i2c: {:?}", e);
                 app_state_lock.sht30_errors += 1;
             }
         };
-        counter(
-            "sht30_error",
-            "Errors reading from SHT30 Sensor",
-            [],
-            [Sample::new([], app_state_lock.sht30_errors as f32)],
-        ).write_chunks(chunk_writer).await?;
 
-            
+        chunk_writer
+            .write(counter(
+                "sht30_error",
+                "Errors reading from SHT30 Sensor",
+                [],
+                [Sample::new([], app_state_lock.sht30_errors as f32)].iter(),
+            ))
+            .await?;
+
         if app_state_lock.has_ina237 {
             if let Ok(reading) = app_state_lock.read_i2c_ina237().await {
-                gauge(
-                    "ina237_reading",
-                    "register values from INA237 Sensor",
-                    ["register"],
-                    [
-                        Sample::new(["bus_voltage"], reading.bus_voltage),
-                        Sample::new(["shunt_voltage"], reading.shunt_voltage),
-                        Sample::new(["current"], reading.current),
-                        Sample::new(["power"], reading.power),
-                        Sample::new(["die_temperature"], reading.die_temperature),
-                    ],
-                ).write_chunks(chunk_writer).await?;
+                chunk_writer
+                    .write(gauge(
+                        "ina237_reading",
+                        "register values from INA237 Sensor",
+                        ["register"],
+                        [
+                            Sample::new(["bus_voltage"], reading.bus_voltage),
+                            Sample::new(["shunt_voltage"], reading.shunt_voltage),
+                            Sample::new(["current"], reading.current),
+                            Sample::new(["power"], reading.power),
+                            Sample::new(["die_temperature"], reading.die_temperature),
+                        ].iter(),
+                    ))
+                    .await?;
             }
         }
 
@@ -148,9 +163,7 @@ async fn metrics(
         *last_req = Instant::now();
     }
 
-    ChunkedResponse::new(MetricsResponse::new(PicoClimateMetrics {
-        app_state
-    }))
+    ChunkedResponse::new(MetricsResponse::new(PicoClimateMetrics { app_state }))
 }
 
 #[derive(Clone, Copy)]
