@@ -24,9 +24,11 @@ portable-atomic = { version = "1.5", features = ["critical-section", "float"] }
 rand_core = "0.9.3"
 heapless = "0.8.0"
 picoserve = { version = "0.16.0", features = ["embassy"] }
+embassy-futures = { version = "0.1.2", features = ["defmt"] }
 
 [profile.release]
 debug = 2
+strip = "debuginfo"
 
 [profile.dev]
 debug = 2

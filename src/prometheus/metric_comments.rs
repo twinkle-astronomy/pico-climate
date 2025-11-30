@@ -2,20 +2,19 @@ use picoserve::response::chunked::ChunkWriter;
 
 use crate::prometheus::MetricType;
 
-
-pub(super) struct MetricComments {
-    help: &'static str,
+pub(super) struct MetricComments<'a> {
+    help: &'a str,
     metric_type: MetricType,
 }
 
-impl MetricComments {
-    pub(super) const fn new(help: &'static str, metric_type: MetricType) -> Self {
+impl<'a> MetricComments<'a> {
+    pub(super) const fn new(help: &'a str, metric_type: MetricType) -> Self {
         Self { help, metric_type }
     }
 
     pub(super) async fn write_chunks<W: picoserve::io::Write>(
         &self,
-        name: &'static str,
+        name: &'a str,
         chunk_writer: &mut ChunkWriter<W>,
     ) -> Result<(), W::Error> {
         write!(chunk_writer, "# HELP {} {}\n", name, self.help).await?;

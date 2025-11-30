@@ -1,7 +1,7 @@
 #![no_std]
 #![no_main]
 
-use cyw43::JoinOptions;
+use cyw43::{JoinOptions, ScanOptions};
 use cyw43_pio::PioSpi;
 use embassy_executor::Spawner;
 use embassy_rp::adc::{Adc, Channel};
@@ -74,10 +74,13 @@ async fn watchdog_feeder(mut watchdog: Watchdog) {
 #[embassy_executor::main]
 async fn main(spawner: Spawner) {
     let p = embassy_rp::init(Default::default());
-    let mut watchdog = Watchdog::new(p.WATCHDOG);
-    watchdog.start(Duration::from_secs(5));
-    spawner.spawn(watchdog_feeder(watchdog)).unwrap();
-    
+
+    #[cfg(not(debug_assertions))]
+    {
+        let mut watchdog = Watchdog::new(p.WATCHDOG);
+        watchdog.start(Duration::from_secs(5));
+        spawner.spawn(watchdog_feeder(watchdog)).unwrap();
+    }
     //Onboard temp sensor
     let adc = Adc::new(p.ADC, Irqs, embassy_rp::adc::Config::default());
     let temp_sensor = Channel::new_temp_sensor(p.ADC_TEMP_SENSOR);
@@ -130,7 +133,7 @@ async fn main(spawner: Spawner) {
     control.gpio_set(0, true).await;
 
     control
-        .set_power_management(cyw43::PowerManagementMode::PowerSave)
+        .set_power_management(cyw43::PowerManagementMode::Performance)
         .await;
 
     info!("Set power management to PowerSave");
@@ -191,6 +194,40 @@ async fn main(spawner: Spawner) {
         info!("Stack configured");
         info!("Hostname: '{}'", create_unique_hostname(uid));
 
-        stack.wait_link_down().await;
+        // stack.wait_link_down().await;
+
+        embassy_futures::select::select(async {
+            stack.wait_link_down().await;
+        }, async {
+            
+            loop {
+                let mut scan_opts = ScanOptions::default();
+                scan_opts.ssid = Some(heapless::String::try_from(wifi_ssid).unwrap());
+                
+                let mut scan = control.scan(scan_opts).await;
+                loop {
+                    let s = match scan.next().await {
+                        Some(s) => s,
+                        None => break
+                    };
+                    let channel = s.chanspec & 0xff;
+
+                    app_state.lock().await.wifi_signal[(channel as usize - 1) + 14*0].sample(-s.rssi as f32);
+                    app_state.lock().await.wifi_signal[(channel as usize - 1) + 14*1].sample(-s.phy_noise as f32);
+                    app_state.lock().await.wifi_signal[(channel as usize - 1) + 14*2].sample((s.rssi - s.phy_noise as i16) as f32);
+                    info!("{}: chanspec: {:04x}, channel: {:04x}, rssi: {}, phy_noise: {}, snr: {}",
+                        str::from_utf8(&s.ssid).unwrap(),
+                        s.chanspec,
+                        s.chanspec & 0xff,
+                        s.rssi,
+                        s.phy_noise,
+                        s.rssi - s.phy_noise as i16,
+                    );
+                    
+                }
+            }
+
+        }).await;
+
     }
 }

@@ -1,50 +1,54 @@
-use picoserve::response::chunked::ChunkWriter;
+use core::{array::IntoIter, future::Future, iter::Zip};
 
-use crate::prometheus::Sample;
+use crate::prometheus::{sample::LabelValueIter, Sample};
 
+pub type LabelsIter<'a, const LABELS: usize> =
+    Zip<IntoIter<&'a str, LABELS>, LabelValueIter<'a, LABELS>>;
 
-pub(super) struct MetricSamples<'a, const LABELS: usize, I> where I: Iterator<Item = &'a Sample<LABELS>> {
-    labels: [&'static str; LABELS],
+pub(super) struct MetricSamples<'a, const LABELS: usize, I>
+where
+    I: Iterator<Item = &'a Sample<'a, LABELS>>,
+{
+    labels: [&'a str; LABELS],
     samples: I,
 }
 
-impl<'a, const LABELS: usize, I> MetricSamples<'a, LABELS, I> where I: Iterator<Item = &'a Sample<LABELS>> {
-    pub(super) const fn new(labels: [&'static str; LABELS], samples: I) -> Self {
+impl<'a, const LABELS: usize, I> MetricSamples<'a, LABELS, I>
+where
+    I: Iterator<Item = &'a Sample<'a, LABELS>> + 'a,
+{
+    pub(super) const fn new(labels: [&'a str; LABELS], samples: I) -> Self {
         MetricSamples { labels, samples }
     }
-}
 
-impl<'a, const LABELS: usize, I> MetricSamples<'a, LABELS, I> where I: Iterator<Item = &'a Sample<LABELS>> {
-    pub(super) async fn write_chunks<W: picoserve::io::Write>(
-        self,
-        name: &'static str,
-        chunk_writer: &mut ChunkWriter<W>,
-    ) -> Result<(), W::Error> {
-        for sample in self.samples {
-            write!(chunk_writer, "{}{}", name, "{").await?;
-            for (i, (label_name, label_value)) in self
-                .labels
-                .iter()
-                .zip(sample.label_values.iter())
-                .enumerate()
-            {
-                if i > 0 {
-                    write!(chunk_writer, ",").await?;
-                }
-                write!(chunk_writer, "{}=\"{}\"", label_name, label_value).await?;
-                chunk_writer.flush().await?;
-            }
-            chunk_writer.flush().await?;
-            write!(chunk_writer, "{}", "}").await?;
-            chunk_writer.flush().await?;
-            write!(
-                chunk_writer,
-                " {}\n",
-                sample.value.load(core::sync::atomic::Ordering::SeqCst)
-            )
-            .await?;
-            chunk_writer.flush().await?;
+    fn labels_iter(&self, sample: &'a Sample<'a, LABELS>) -> (f32, LabelsIter<'a, LABELS>) {
+        (
+            sample.get(),
+            self.labels.into_iter().zip(sample.get_label_values()),
+        )
+    }
+
+    pub(super) async fn write_chunks<E>(
+        mut self,
+        mut func: impl MetricLineWriter<Error = E>,
+    ) -> Result<(), E> {
+        loop {
+            let sample = match self.samples.next() {
+                Some(s) => s,
+                None => break,
+            };
+            let (value, labels_iter) = self.labels_iter(sample);
+            func.write_metric_line(value, labels_iter).await?;
         }
         Ok(())
     }
+}
+
+pub trait MetricLineWriter {
+    type Error;
+    fn write_metric_line<'a, const LABELS: usize>(
+        &mut self,
+        value: f32,
+        label_iter: LabelsIter<'a, LABELS>,
+    ) -> impl Future<Output = Result<(), Self::Error>>;
 }

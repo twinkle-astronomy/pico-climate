@@ -12,16 +12,13 @@ use picoserve::routing::get;
 use defmt_rtt as _;
 use static_cell::StaticCell;
 
+use crate::prometheus::sample::Sample;
 use crate::prometheus::{
-    counter, gauge, Histogram, MetricWriter, MetricsRender, MetricsResponse, Sample,
+    counter, gauge, histogram, HistogramSamples, MetricWriter, MetricsRender, MetricsResponse,
 };
 use crate::{adc_temp_sensor, Mutex};
 
 pub static LAST_REQUEST_TIME: Mutex<Instant> = Mutex::new(Instant::MIN);
-
-pub static WIFI_RSSI_STRENGTH: Mutex<Histogram<10>> = Mutex::new(Histogram::new([
-    10., 20., 30., 40., 50., 60., 70., 80., 90., 100.,
-]));
 
 const SHT30_ADDR: u16 = 0x44;
 const SHT30_HIG_REP_CLOCK_STRETCH_READ: [u8; 2] = [0x2C, 0x06];
@@ -41,14 +38,23 @@ impl MetricsRender for PicoClimateMetrics {
         W: picoserve::io::Write,
     {
         let mut app_state_lock = self.app_state.state.lock().await;
-        app_state_lock.count = app_state_lock.count + 1;
+        app_state_lock.count[0].incr(1.);
 
         chunk_writer
             .write(counter(
                 "http_request_count",
                 "Number of http requests recieved",
                 [],
-                [Sample::new([], app_state_lock.count as f32)].iter(),
+                app_state_lock.count.iter(),
+            ))
+            .await?;
+
+        chunk_writer
+            .write(histogram(
+                "wifi_signal_strength",
+                "Wifi signal strength",
+                ["ssid", "channel", "metric"],
+                app_state_lock.wifi_signal.iter(),
             ))
             .await?;
 
@@ -62,7 +68,8 @@ impl MetricsRender for PicoClimateMetrics {
                         Sample::new(["C"], adc_sample.temp_celsius),
                         Sample::new(["volts"], adc_sample.volt),
                         Sample::new(["raw"], adc_sample.raw as f32),
-                    ].iter(),
+                    ]
+                    .iter(),
                 ))
                 .await?;
         }
@@ -85,7 +92,8 @@ impl MetricsRender for PicoClimateMetrics {
                         [
                             Sample::new(["temperature"], temperature),
                             Sample::new(["humidity"], humidity),
-                        ].iter(),
+                        ]
+                        .iter(),
                     ))
                     .await?;
 
@@ -112,7 +120,8 @@ impl MetricsRender for PicoClimateMetrics {
                                 ["write_data_checksum_status"],
                                 if write_data_checksum_status { 1. } else { 0. },
                             ),
-                        ].iter(),
+                        ]
+                        .iter(),
                     ))
                     .await?;
             }
@@ -144,7 +153,8 @@ impl MetricsRender for PicoClimateMetrics {
                             Sample::new(["current"], reading.current),
                             Sample::new(["power"], reading.power),
                             Sample::new(["die_temperature"], reading.die_temperature),
-                        ].iter(),
+                        ]
+                        .iter(),
                     ))
                     .await?;
             }
@@ -180,11 +190,60 @@ impl AppState {
 
         static STATE: StaticCell<Mutex<State>> = StaticCell::new();
         let state = STATE.init(Mutex::new(State {
-            count: 0,
+            count: [Sample::new([], 0.)],
             adc_temp_sensor,
             sht30_errors: 0,
             i2c,
             has_ina237: false,
+            wifi_signal: [
+                // RSSI
+                HistogramSamples::new([env!("WIFI_SSID"), "1", "rssi"], [10., 20., 30., 40., 50., 60., 70., 80., 90., 100., f32::INFINITY]),
+                HistogramSamples::new([env!("WIFI_SSID"), "2", "rssi"], [10., 20., 30., 40., 50., 60., 70., 80., 90., 100., f32::INFINITY]),
+                HistogramSamples::new([env!("WIFI_SSID"), "3", "rssi"], [10., 20., 30., 40., 50., 60., 70., 80., 90., 100., f32::INFINITY]),
+                HistogramSamples::new([env!("WIFI_SSID"), "4", "rssi"], [10., 20., 30., 40., 50., 60., 70., 80., 90., 100., f32::INFINITY]),
+                HistogramSamples::new([env!("WIFI_SSID"), "5", "rssi"], [10., 20., 30., 40., 50., 60., 70., 80., 90., 100., f32::INFINITY]),
+                HistogramSamples::new([env!("WIFI_SSID"), "6", "rssi"], [10., 20., 30., 40., 50., 60., 70., 80., 90., 100., f32::INFINITY]),
+                HistogramSamples::new([env!("WIFI_SSID"), "7", "rssi"], [10., 20., 30., 40., 50., 60., 70., 80., 90., 100., f32::INFINITY]),
+                HistogramSamples::new([env!("WIFI_SSID"), "8", "rssi"], [10., 20., 30., 40., 50., 60., 70., 80., 90., 100., f32::INFINITY]),
+                HistogramSamples::new([env!("WIFI_SSID"), "9", "rssi"], [10., 20., 30., 40., 50., 60., 70., 80., 90., 100., f32::INFINITY]),
+                HistogramSamples::new([env!("WIFI_SSID"), "10", "rssi"], [10., 20., 30., 40., 50., 60., 70., 80., 90., 100., f32::INFINITY]),
+                HistogramSamples::new([env!("WIFI_SSID"), "11", "rssi"], [10., 20., 30., 40., 50., 60., 70., 80., 90., 100., f32::INFINITY]),
+                HistogramSamples::new([env!("WIFI_SSID"), "12", "rssi"], [10., 20., 30., 40., 50., 60., 70., 80., 90., 100., f32::INFINITY]),
+                HistogramSamples::new([env!("WIFI_SSID"), "13", "rssi"], [10., 20., 30., 40., 50., 60., 70., 80., 90., 100., f32::INFINITY]),
+                HistogramSamples::new([env!("WIFI_SSID"), "14", "rssi"], [10., 20., 30., 40., 50., 60., 70., 80., 90., 100., f32::INFINITY]),
+
+                // PHY_NOISE
+                HistogramSamples::new([env!("WIFI_SSID"), "1", "phy_noise"], [10., 20., 30., 40., 50., 60., 70., 80., 90., 100., f32::INFINITY]),
+                HistogramSamples::new([env!("WIFI_SSID"), "2", "phy_noise"], [10., 20., 30., 40., 50., 60., 70., 80., 90., 100., f32::INFINITY]),
+                HistogramSamples::new([env!("WIFI_SSID"), "3", "phy_noise"], [10., 20., 30., 40., 50., 60., 70., 80., 90., 100., f32::INFINITY]),
+                HistogramSamples::new([env!("WIFI_SSID"), "4", "phy_noise"], [10., 20., 30., 40., 50., 60., 70., 80., 90., 100., f32::INFINITY]),
+                HistogramSamples::new([env!("WIFI_SSID"), "5", "phy_noise"], [10., 20., 30., 40., 50., 60., 70., 80., 90., 100., f32::INFINITY]),
+                HistogramSamples::new([env!("WIFI_SSID"), "6", "phy_noise"], [10., 20., 30., 40., 50., 60., 70., 80., 90., 100., f32::INFINITY]),
+                HistogramSamples::new([env!("WIFI_SSID"), "7", "phy_noise"], [10., 20., 30., 40., 50., 60., 70., 80., 90., 100., f32::INFINITY]),
+                HistogramSamples::new([env!("WIFI_SSID"), "8", "phy_noise"], [10., 20., 30., 40., 50., 60., 70., 80., 90., 100., f32::INFINITY]),
+                HistogramSamples::new([env!("WIFI_SSID"), "9", "phy_noise"], [10., 20., 30., 40., 50., 60., 70., 80., 90., 100., f32::INFINITY]),
+                HistogramSamples::new([env!("WIFI_SSID"), "10", "phy_noise"], [10., 20., 30., 40., 50., 60., 70., 80., 90., 100., f32::INFINITY]),
+                HistogramSamples::new([env!("WIFI_SSID"), "11", "phy_noise"], [10., 20., 30., 40., 50., 60., 70., 80., 90., 100., f32::INFINITY]),
+                HistogramSamples::new([env!("WIFI_SSID"), "12", "phy_noise"], [10., 20., 30., 40., 50., 60., 70., 80., 90., 100., f32::INFINITY]),
+                HistogramSamples::new([env!("WIFI_SSID"), "13", "phy_noise"], [10., 20., 30., 40., 50., 60., 70., 80., 90., 100., f32::INFINITY]),
+                HistogramSamples::new([env!("WIFI_SSID"), "14", "phy_noise"], [10., 20., 30., 40., 50., 60., 70., 80., 90., 100., f32::INFINITY]),
+
+                // SNR
+                HistogramSamples::new([env!("WIFI_SSID"), "1", "snr"], [10., 20., 30., 40., 50., 60., 70., 80., 90., 100., f32::INFINITY]),
+                HistogramSamples::new([env!("WIFI_SSID"), "2", "snr"], [10., 20., 30., 40., 50., 60., 70., 80., 90., 100., f32::INFINITY]),
+                HistogramSamples::new([env!("WIFI_SSID"), "3", "snr"], [10., 20., 30., 40., 50., 60., 70., 80., 90., 100., f32::INFINITY]),
+                HistogramSamples::new([env!("WIFI_SSID"), "4", "snr"], [10., 20., 30., 40., 50., 60., 70., 80., 90., 100., f32::INFINITY]),
+                HistogramSamples::new([env!("WIFI_SSID"), "5", "snr"], [10., 20., 30., 40., 50., 60., 70., 80., 90., 100., f32::INFINITY]),
+                HistogramSamples::new([env!("WIFI_SSID"), "6", "snr"], [10., 20., 30., 40., 50., 60., 70., 80., 90., 100., f32::INFINITY]),
+                HistogramSamples::new([env!("WIFI_SSID"), "7", "snr"], [10., 20., 30., 40., 50., 60., 70., 80., 90., 100., f32::INFINITY]),
+                HistogramSamples::new([env!("WIFI_SSID"), "8", "snr"], [10., 20., 30., 40., 50., 60., 70., 80., 90., 100., f32::INFINITY]),
+                HistogramSamples::new([env!("WIFI_SSID"), "9", "snr"], [10., 20., 30., 40., 50., 60., 70., 80., 90., 100., f32::INFINITY]),
+                HistogramSamples::new([env!("WIFI_SSID"), "10", "snr"], [10., 20., 30., 40., 50., 60., 70., 80., 90., 100., f32::INFINITY]),
+                HistogramSamples::new([env!("WIFI_SSID"), "11", "snr"], [10., 20., 30., 40., 50., 60., 70., 80., 90., 100., f32::INFINITY]),
+                HistogramSamples::new([env!("WIFI_SSID"), "12", "snr"], [10., 20., 30., 40., 50., 60., 70., 80., 90., 100., f32::INFINITY]),
+                HistogramSamples::new([env!("WIFI_SSID"), "13", "snr"], [10., 20., 30., 40., 50., 60., 70., 80., 90., 100., f32::INFINITY]),
+                HistogramSamples::new([env!("WIFI_SSID"), "14", "snr"], [10., 20., 30., 40., 50., 60., 70., 80., 90., 100., f32::INFINITY]),
+            ]
         }));
 
         {
@@ -211,10 +270,11 @@ impl Deref for AppState {
 
 pub struct State {
     adc_temp_sensor: &'static mut adc_temp_sensor::Sensor<'static>,
-    count: usize,
+    count: [Sample<'static, 0>; 1],
     pub sht30_errors: usize,
     pub i2c: I2c<'static, I2C0, Async>,
     pub has_ina237: bool,
+    pub wifi_signal: [HistogramSamples<'static, 3, 11>; 14*3],
 }
 struct I2CReading {
     temperature: f32,
