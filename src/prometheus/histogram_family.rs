@@ -49,6 +49,9 @@ where
     ) -> Result<(), W::Error> {
         self.comments.write_chunks(self.name, chunk_writer).await?;
         for sample in self.samples {
+            if sample.count == 0 {
+                continue
+            }
             {
                 let count_samples = [Sample::new(sample.label_values, sample.count as f32)];
                 let count_metric = MetricSamples::new(self.labels, count_samples.iter());
@@ -81,8 +84,6 @@ where
                 }
             }
         }
-        // self.samples.write_chunks(self.name, chunk_writer).await?;
-        chunk_writer.flush().await?;
         Ok(())
     }
 }

@@ -18,7 +18,6 @@ impl<'a> MetricComments<'a> {
         chunk_writer: &mut ChunkWriter<W>,
     ) -> Result<(), W::Error> {
         write!(chunk_writer, "# HELP {} {}\n", name, self.help).await?;
-        chunk_writer.flush().await?;
         write!(
             chunk_writer,
             "# TYPE {} {}\n",

@@ -150,7 +150,6 @@ impl<W: picoserve::io::Write> MetricWriter<W::Error> for ChunkWriter<W> {
 
     async fn write_value(&mut self, value: f32) -> Result<(), W::Error> {
         write!(self, " {}\n", value).await?;
-        self.flush().await?;
         Ok(())
     }
 }
