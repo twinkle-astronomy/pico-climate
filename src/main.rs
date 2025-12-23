@@ -215,14 +215,7 @@ async fn main(spawner: Spawner) {
                     app_state.lock().await.wifi_signal[(channel as usize - 1) + 14*0].sample(-s.rssi as f32);
                     app_state.lock().await.wifi_signal[(channel as usize - 1) + 14*1].sample(-s.phy_noise as f32);
                     app_state.lock().await.wifi_signal[(channel as usize - 1) + 14*2].sample((s.rssi - s.phy_noise as i16) as f32);
-                    info!("{}: chanspec: {:04x}, channel: {:04x}, rssi: {}, phy_noise: {}, snr: {}",
-                        str::from_utf8(&s.ssid).unwrap(),
-                        s.chanspec,
-                        s.chanspec & 0xff,
-                        s.rssi,
-                        s.phy_noise,
-                        s.rssi - s.phy_noise as i16,
-                    );
+
                     
                 }
             }

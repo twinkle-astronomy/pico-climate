@@ -13,7 +13,7 @@ panic-probe = { version = "1", features = ["print-defmt"] }
 embassy-executor = { version = "0.8.0", features = ["arch-cortex-m", "executor-thread", "defmt"] }
 embassy-rp = { version = "0.7.0", features = ["time-driver", "rp2040", "critical-section-impl", "defmt"] }
 embassy-net = { version = "0.7.0", features = ["tcp", "udp", "dhcpv4", "dhcpv4-hostname", "dns", "defmt"] }
-embassy-time = { version = "0.4.0", features = ["defmt"] }
+embassy-time = { version = "0.5.0", features = ["defmt"] }
 embassy-sync = "0.7"
 defmt = "1.0"
 defmt-rtt = "1.0"
