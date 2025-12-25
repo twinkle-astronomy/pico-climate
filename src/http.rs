@@ -1,10 +1,10 @@
 use core::ops::Deref;
 
-use defmt::{error, info};
+use defmt::{Format, error, info};
 use embassy_net::Stack;
 use embassy_rp::i2c::{Async, I2c};
 use embassy_rp::peripherals::I2C0;
-use embassy_time::{Duration, Instant};
+use embassy_time::{Duration, Instant, TimeoutError, with_timeout};
 use picoserve::response::chunked::ChunkedResponse;
 use picoserve::response::IntoResponse;
 use picoserve::routing::get;
@@ -125,7 +125,7 @@ impl MetricsRender for PicoClimateMetrics {
                     .await?;
             }
             Err(e) => {
-                error!("Got error reading i2c: {:?}", e);
+                error!("Got error reading from sht30: {:?}", e);
                 app_state_lock.sht30_errors += 1;
             }
         };
@@ -932,49 +932,70 @@ struct I2CReading {
     write_data_checksum_status: bool,
 }
 
+#[derive(Debug, Format)]
+enum Sht30Error {
+    I2cError(embassy_rp::i2c::Error),
+    Timeout(TimeoutError),
+}
+
+impl From<embassy_rp::i2c::Error> for Sht30Error {
+    fn from(value: embassy_rp::i2c::Error) -> Self {
+        Sht30Error::I2cError(value)
+    }
+}
+
+impl From<TimeoutError> for Sht30Error {
+    fn from(value: TimeoutError) -> Self {
+        Sht30Error::Timeout(value)
+    }
+}
+
 impl State {
-    async fn read_i2c_sht30(&mut self) -> Result<I2CReading, embassy_rp::i2c::Error> {
-        self.i2c.write_async(SHT30_ADDR, SHT30_CLEAR_STATUS).await?;
-        self.i2c
-            .write_async(SHT30_ADDR, SHT30_HIG_REP_CLOCK_STRETCH_READ)
-            .await?;
+    async fn read_i2c_sht30(&mut self) -> Result<I2CReading, Sht30Error> {
+        with_timeout(Duration::from_secs(1), async {
+            self.i2c.write_async(SHT30_ADDR, SHT30_CLEAR_STATUS).await?;
+            self.i2c
+                .write_async(SHT30_ADDR, SHT30_HIG_REP_CLOCK_STRETCH_READ)
+                .await?;
 
-        // Read 6 bytes of data
-        let mut buffer = [0u8; 6];
-        self.i2c.read_async(SHT30_ADDR, &mut buffer).await?;
+            // Read 6 bytes of data
+            let mut buffer = [0u8; 6];
+            self.i2c.read_async(SHT30_ADDR, &mut buffer).await?;
 
-        // Parse temperature data (first 3 bytes)
-        let temp_raw = ((buffer[0] as u16) << 8) | (buffer[1] as u16);
-        // Skip CRC check for simplicity (buffer[2] is CRC)
+            // Parse temperature data (first 3 bytes)
+            let temp_raw = ((buffer[0] as u16) << 8) | (buffer[1] as u16);
+            // Skip CRC check for simplicity (buffer[2] is CRC)
 
-        // Parse humidity data (next 3 bytes)
-        let hum_raw = ((buffer[3] as u16) << 8) | (buffer[4] as u16);
-        // Skip CRC check for simplicity (buffer[5] is CRC)
+            // Parse humidity data (next 3 bytes)
+            let hum_raw = ((buffer[3] as u16) << 8) | (buffer[4] as u16);
+            // Skip CRC check for simplicity (buffer[5] is CRC)
 
-        // Convert to actual values
-        let temperature = -45.0 + 175.0 * (temp_raw as f32) / 65535.0;
-        let humidity = 100.0 * (hum_raw as f32) / 65535.0;
+            // Convert to actual values
+            let temperature = -45.0 + 175.0 * (temp_raw as f32) / 65535.0;
+            let humidity = 100.0 * (hum_raw as f32) / 65535.0;
 
-        self.i2c.write_async(SHT30_ADDR, SHT30_READ_STATUS).await?;
-        self.i2c.read_async(SHT30_ADDR, &mut buffer).await?;
+            self.i2c.write_async(SHT30_ADDR, SHT30_READ_STATUS).await?;
+            self.i2c.read_async(SHT30_ADDR, &mut buffer).await?;
 
-        let status: u16 = ((buffer[0] as u16) << 8) | (buffer[1] as u16);
+            let status: u16 = ((buffer[0] as u16) << 8) | (buffer[1] as u16);
 
-        let heater_status = status & 0b010000000000000 != 0;
-        let humidity_tracking_alert = status & 0b000100000000000 != 0;
-        let temperature_tracking_alert = status & 0b000010000000000 != 0;
-        let command_status_success = status & 0b000000000000010 != 0;
-        let write_data_checksum_status = status & 0b000000000000001 != 0;
+            let heater_status = status & 0b010000000000000 != 0;
+            let humidity_tracking_alert = status & 0b000100000000000 != 0;
+            let temperature_tracking_alert = status & 0b000010000000000 != 0;
+            let command_status_success = status & 0b000000000000010 != 0;
+            let write_data_checksum_status = status & 0b000000000000001 != 0;
 
-        Ok(I2CReading {
-            temperature,
-            humidity,
-            heater_status,
-            humidity_tracking_alert,
-            temperature_tracking_alert,
-            command_status_success,
-            write_data_checksum_status,
-        })
+            Ok(I2CReading {
+                temperature,
+                humidity,
+                heater_status,
+                humidity_tracking_alert,
+                temperature_tracking_alert,
+                command_status_success,
+                write_data_checksum_status,
+            })
+        }).await?
+
     }
 }
 
