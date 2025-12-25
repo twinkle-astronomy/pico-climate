@@ -15,7 +15,7 @@ use crate::prometheus::sample::Sample;
 use crate::prometheus::{
     counter, gauge, histogram, HistogramSamples, MetricWriter, MetricsRender, MetricsResponse,
 };
-use crate::{adc_temp_sensor, Mutex};
+use crate::{Mutex, adc_temp_sensor};
 
 pub static LAST_REQUEST_TIME: Mutex<Instant> = Mutex::new(Instant::MIN);
 
@@ -978,9 +978,9 @@ impl State {
     }
 }
 
-#[embassy_executor::task(pool_size = 16)]
+#[embassy_executor::task(pool_size = 8)]
 pub async fn web_task(id: usize, stack: &'static Stack<'static>, app_state: &'static AppState) {
-    let app = picoserve::Router::new().route("/metrics", get(metrics));
+    let app = picoserve::Router::new().route("/metrics", get(metrics)).with_state(app_state);
 
     if let Err(e) = app_state.state.lock().await.read_i2c_sht30().await {
         error!("Got error reading i2c: {:?}", e);
@@ -994,19 +994,15 @@ pub async fn web_task(id: usize, stack: &'static Stack<'static>, app_state: &'st
             write: Some(Duration::from_secs(1)),
         });
 
-        let mut rx_buffer = [0; 2024];
-        let mut tx_buffer = [0; 2024];
-        let mut http_buffer = [0; 4048];
-        let _ = picoserve::listen_and_serve_with_state(
+        let mut rx_buffer = [0; 1012];
+        let mut tx_buffer = [0; 1012];
+        let mut http_buffer = [0; 1012];
+        let _ = picoserve::Server::new(&app, &config, &mut http_buffer).listen_and_serve(
             id,
-            &app,
-            &config,
             *stack,
             80,
             &mut rx_buffer,
             &mut tx_buffer,
-            &mut http_buffer,
-            &app_state,
         )
         .await;
     }

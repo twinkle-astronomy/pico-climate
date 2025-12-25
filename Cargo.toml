@@ -10,25 +10,25 @@ embedded-hal = { version = "1.0.0" }
 
 panic-probe = { version = "1", features = ["print-defmt"] }
 
-embassy-executor = { version = "0.8.0", features = ["arch-cortex-m", "executor-thread", "defmt"] }
-embassy-rp = { version = "0.7.0", features = ["time-driver", "rp2040", "critical-section-impl", "defmt"] }
+embassy-executor = { version = "0.9", features = ["arch-cortex-m", "executor-thread", "defmt"] }
+embassy-rp = { version = "0.9", features = ["time-driver", "rp2040", "critical-section-impl", "defmt"] }
 embassy-net = { version = "0.7.0", features = ["tcp", "udp", "dhcpv4", "dhcpv4-hostname", "dns", "defmt"] }
 embassy-time = { version = "0.5.0", features = ["defmt"] }
 embassy-sync = "0.7"
 defmt = "1.0"
 defmt-rtt = "1.0"
-cyw43 = { version = "0.4.0", features = ["defmt", "firmware-logs"] }
-cyw43-pio = { version = "0.6.0", features = ["defmt"] }
+cyw43 = { version = "0.6", features = ["defmt", "firmware-logs"] }
+cyw43-pio = { version = "0.9", features = ["defmt"] }
 static_cell = "2.1.1"
 portable-atomic = { version = "1.5", features = ["critical-section", "float"] }
 rand_core = "0.9.3"
-heapless = "0.8.0"
-picoserve = { version = "0.16.0", features = ["embassy"] }
+heapless = "0.8"
+picoserve = { version = "0.17", features = ["embassy"] }
 embassy-futures = { version = "0.1.2", features = ["defmt"] }
 
 [profile.release]
 debug = 2
-strip = "debuginfo"
+#strip = "debuginfo"
 
 [profile.dev]
 debug = 2

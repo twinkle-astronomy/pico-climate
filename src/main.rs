@@ -62,7 +62,7 @@ async fn watchdog_feeder(mut watchdog: Watchdog) {
     // Require a request in the last 2 minutes.
     loop {
         let elapsed  = LAST_REQUEST_TIME.lock().await.elapsed();
-        info!("elapsed: {}", elapsed);
+        debug!("elapsed: {}", elapsed);
         if elapsed < Duration::from_secs(120) {
             debug!("Feeding the watchdog");
             watchdog.feed();
@@ -75,6 +75,7 @@ async fn watchdog_feeder(mut watchdog: Watchdog) {
 async fn main(spawner: Spawner) {
     let p = embassy_rp::init(Default::default());
 
+    info!("Booting!");
     #[cfg(not(debug_assertions))]
     {
         let mut watchdog = Watchdog::new(p.WATCHDOG);
@@ -103,8 +104,6 @@ async fn main(spawner: Spawner) {
         );
     let mut uid = [0u8; 8];
     flash.blocking_unique_id(&mut uid).unwrap();
-
-    info!("Booting!");
 
     let fw = include_bytes!("../cyw43-firmware/43439A0.bin");
     let clm = include_bytes!("../cyw43-firmware/43439A0_clm.bin");
@@ -136,7 +135,7 @@ async fn main(spawner: Spawner) {
         .set_power_management(cyw43::PowerManagementMode::Performance)
         .await;
 
-    info!("Set power management to PowerSave");
+    info!("Set power management to Performance");
 
     let wifi_ssid = env!("WIFI_SSID");
     let wifi_password = env!("WIFI_PASSWORD");
@@ -146,15 +145,14 @@ async fn main(spawner: Spawner) {
     dhcp_config.hostname = Some(create_unique_hostname(uid));
     let net_config = NetConfig::dhcpv4(dhcp_config);
 
-    static RESOURCES: StaticCell<embassy_net::StackResources<32>> = StaticCell::new();
+    static RESOURCES: StaticCell<embassy_net::StackResources<16>> = StaticCell::new();
     let (stack, runner) = embassy_net::new(
         net_device,
         net_config,
         RESOURCES.init(embassy_net::StackResources::new()),
         seed,
     );
-    let _ = spawner.spawn(net_task(runner));
-
+    spawner.must_spawn(net_task(runner));
     static WEB_STACK: StaticCell<Stack<'_>> = StaticCell::new();
     let stack = WEB_STACK.init(stack);
 
