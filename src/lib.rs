@@ -7,5 +7,7 @@ pub mod adc_temp_sensor;
 pub mod http;
 mod ina237;
 pub mod prometheus;
+// pub mod tcp_logger;
+use defmt_rtt as _;
 
 pub type Mutex<T> = EmbMutex<CriticalSectionRawMutex, T>;

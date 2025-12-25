@@ -8,8 +8,6 @@ use core::future::Future;
 
 use picoserve::response::chunked::{ChunkWriter, Chunks, ChunksWritten};
 
-use defmt_rtt as _;
-
 use crate::prometheus::{
     histogram_family::HistogramFamily, metric_family::MetricFamily, sample::Sample,
 };

@@ -1,6 +1,5 @@
 use crate::http::State;
 use defmt::{debug, error, info, Format};
-use defmt_rtt as _;
 use embassy_rp::i2c::Error;
 use embassy_time::{with_timeout, Duration, Timer};
 

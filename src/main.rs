@@ -17,6 +17,7 @@ use embassy_time::{Duration, Timer};
 use panic_probe as _;
 use pico_climate::adc_temp_sensor;
 use pico_climate::http::{web_task, AppState, LAST_REQUEST_TIME};
+// use pico_climate::tcp_logger::tcp_logger_task;
 use static_cell::StaticCell;
 
 use core::fmt::Write;
@@ -24,7 +25,6 @@ use embassy_net::{Config as NetConfig, DhcpConfig, Stack};
 use embassy_rp::clocks::RoscRng;
 
 use defmt::{self as _, debug, info};
-use defmt_rtt as _;
 
 bind_interrupts!(struct Irqs {
     PIO0_IRQ_0 => InterruptHandler<PIO0>;
@@ -166,7 +166,8 @@ async fn main(spawner: Spawner) {
             .unwrap(),
     );
 
-    for id in 0..16 {
+    // spawner.must_spawn(tcp_logger_task(stack, "ryzen.lan", 9091));
+    for id in 0..8 {
         spawner.must_spawn(web_task(id, stack, app_state));
     }
 

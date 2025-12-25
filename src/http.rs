@@ -9,7 +9,6 @@ use picoserve::response::chunked::ChunkedResponse;
 use picoserve::response::IntoResponse;
 use picoserve::routing::get;
 
-use defmt_rtt as _;
 use static_cell::StaticCell;
 
 use crate::prometheus::sample::Sample;
