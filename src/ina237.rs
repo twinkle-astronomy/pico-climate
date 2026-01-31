@@ -132,21 +132,23 @@ impl<I: embedded_hal_async::i2c::I2c> Ina237<I>
 where
     <I as embedded_hal::i2c::ErrorType>::Error: Format,
 {
-    pub fn new(i2c: I, addr: u8) -> Self {
-        Self { addr, i2c }
-    }
+    pub async fn new(i2c: I, addr: u8) -> Result<Self, Ina237Error<I>> {
+        let mut dev = Self { addr, i2c };
 
-    pub async fn init(&mut self) -> Result<(), Ina237Error<I>> {
         // Check device ID
-        let manuf_id = self.read_register(INA237_REG_MANUFACTURER_ID).await?;
+        let manuf_id = dev.read_register(INA237_REG_MANUFACTURER_ID).await?;
         debug!("manuf_id: {}", manuf_id);
         if manuf_id != 21577 {
             return Err(Ina237Error::InvalidDeviceId);
         }
 
+        Ok(dev)
+    }
+
+    pub async fn init(&mut self) -> Result<(), Ina237Error<I>> {
         info!("Resetting");
         // Reset device and accumulation registers
-        self.write_register(INA237_REG_CONFIG, 1 << 15).await?;
+        self.write_register(INA237_REG_CONFIG, INA237_CONFIG_RST).await?;
         Timer::after_millis(100).await;
 
         let config: u16 = 0b0_0_00000010_0_0_0000;

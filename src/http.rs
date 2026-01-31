@@ -142,8 +142,8 @@ impl MetricsRender for PicoClimateMetrics {
             ))
             .await?;
 
-        if app_state_lock.has_ina237 {
-            match with_timeout(Duration::from_secs(1), app_state_lock.ina237.read()).await {
+        if let Some(ina237) = &mut app_state_lock.ina237 {
+            match with_timeout(Duration::from_secs(1), ina237.read()).await {
                 Ok(Ok(reading)) => {
                     chunk_writer
                         .write(gauge(
@@ -211,6 +211,7 @@ impl AppState {
         adc_temp_sensor: &'static mut adc_temp_sensor::Sensor<'static>,
         i2c_bus: &'static I2c0Bus,
     ) -> Result<Self, embassy_rp::i2c::Error> {
+        let ina237 = Ina237::new(I2cDevice::new(&i2c_bus), INA237_DEFAULT_ADDR).await.ok();
         let state = STATE.init(Mutex::new(State {
             count: [Sample::new([], 0.)],
             adc_temp_sensor,
@@ -218,8 +219,7 @@ impl AppState {
             ina237_errors: 0,
             i2c: I2cDevice::new(&i2c_bus),
             sht30: Sht30Device::new(I2cDevice::new(&i2c_bus), SHT30_ADDR),
-            ina237: Ina237::new(I2cDevice::new(&i2c_bus), INA237_DEFAULT_ADDR),
-            has_ina237: false,
+            ina237,
             wifi_signal: [
                 // RSSI
                 HistogramSamples::new(
@@ -910,14 +910,17 @@ impl AppState {
             }
 
             // Initialize INA237 power meter if present
-            match with_timeout(Duration::from_secs(1), lock.ina237.init()).await {
-                Ok(_) => {
-                    info!("Found INA237 Power Meter");
-                    lock.has_ina237 = true;
+            if let Some(ina237) = &mut lock.ina237 {
+                match with_timeout(Duration::from_secs(1), ina237.init()).await {
+                    Ok(_) => {
+                        info!("INA237 Power Meter initialized");
+                    }
+                    Err(e) => {
+                        error!("Failed to initialize INA237: {:?}", e);
+                    }
                 }
-                Err(e) => {
-                    error!("INA237 Power Meter NOT FOUND: {:?}", e);
-                }
+            } else {
+                info!("INA237 Power Meter not found");
             }
         }
         Ok(AppState { state })
@@ -938,8 +941,7 @@ pub struct State<I: I2c> {
     pub ina237_errors: usize,
     pub i2c: I,
     pub sht30: Sht30Device<I>,
-    pub ina237: Ina237<I>,
-    pub has_ina237: bool,
+    pub ina237: Option<Ina237<I>>,
     pub wifi_signal: [HistogramSamples<'static, 3, 11>; 14 * 3],
 }
 
