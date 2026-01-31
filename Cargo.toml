@@ -25,6 +25,8 @@ rand_core = "0.9.3"
 heapless = "0.8"
 picoserve = { version = "0.17", features = ["embassy"] }
 embassy-futures = { version = "0.1.2", features = ["defmt"] }
+embedded-hal-async = { version = "1.0.0", features = ["defmt-03"] }
+embassy-embedded-hal = { version = "0.5.0", features = ["defmt"] }
 
 [profile.release]
 debug = 2

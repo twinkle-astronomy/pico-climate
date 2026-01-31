@@ -1,6 +1,6 @@
 use defmt::Format;
 use embassy_rp::adc::{Adc, Async, Channel, Error};
-use embassy_time::{Duration, TimeoutError, with_timeout};
+use embassy_time::{with_timeout, Duration, TimeoutError};
 
 pub struct Sensor<'a> {
     pub adc: Adc<'a, Async>,
@@ -16,7 +16,7 @@ pub struct Value {
 #[derive(Format)]
 pub enum AdcError {
     Adc(Error),
-    Timeout(TimeoutError)
+    Timeout(TimeoutError),
 }
 
 impl From<Error> for AdcError {
@@ -45,7 +45,7 @@ impl<'a> Sensor<'a> {
                 volt,
                 raw,
             })
-
-        }).await?
+        })
+        .await?
     }
 }

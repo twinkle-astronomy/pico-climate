@@ -50,7 +50,7 @@ where
         self.comments.write_chunks(self.name, chunk_writer).await?;
         for sample in self.samples {
             if sample.count == 0 {
-                continue
+                continue;
             }
             {
                 let count_samples = [Sample::new(sample.label_values, sample.count as f32)];

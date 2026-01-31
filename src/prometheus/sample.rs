@@ -25,7 +25,7 @@ impl<'a, const LABELS: usize> Sample<'a, LABELS> {
         self.value
     }
 
-    pub fn get_label_values(&self) -> core::array::IntoIter<&'a str, LABELS>  {
+    pub fn get_label_values(&self) -> core::array::IntoIter<&'a str, LABELS> {
         let f: core::array::IntoIter<&'a str, LABELS> = self.label_values.into_iter();
 
         f

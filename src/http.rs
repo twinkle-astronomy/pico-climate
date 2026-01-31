@@ -1,28 +1,27 @@
 use core::ops::Deref;
 
-use defmt::{Format, error, info};
+use defmt::{error, info};
+use embassy_embedded_hal::shared_bus::asynch::i2c::I2cDevice;
 use embassy_net::Stack;
-use embassy_rp::i2c::{Async, I2c};
-use embassy_rp::peripherals::I2C0;
-use embassy_time::{Duration, Instant, TimeoutError, with_timeout};
+use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
+use embassy_time::{with_timeout, Duration, Instant};
+use embedded_hal_async::i2c::I2c;
 use picoserve::response::chunked::ChunkedResponse;
 use picoserve::response::IntoResponse;
 use picoserve::routing::get;
 
 use static_cell::StaticCell;
 
+use crate::ina237::{Ina237, INA237_DEFAULT_ADDR};
 use crate::prometheus::sample::Sample;
 use crate::prometheus::{
     counter, gauge, histogram, HistogramSamples, MetricWriter, MetricsRender, MetricsResponse,
 };
-use crate::{Mutex, adc_temp_sensor};
+use crate::sht30::{Sht30Device, SHT30_ADDR};
+use crate::{adc_temp_sensor, Mutex};
+use crate::{sht30, I2c0, I2c0Bus};
 
 pub static LAST_REQUEST_TIME: Mutex<Instant> = Mutex::new(Instant::MIN);
-
-const SHT30_ADDR: u16 = 0x44;
-const SHT30_HIG_REP_CLOCK_STRETCH_READ: [u8; 2] = [0x2C, 0x06];
-const SHT30_READ_STATUS: [u8; 2] = [0xF3, 0x2D];
-const SHT30_CLEAR_STATUS: [u8; 2] = [0x30, 0x41];
 
 struct PicoClimateMetrics {
     app_state: AppState,
@@ -73,8 +72,8 @@ impl MetricsRender for PicoClimateMetrics {
                 .await?;
         }
 
-        match app_state_lock.read_i2c_sht30().await {
-            Ok(I2CReading {
+        match with_timeout(Duration::from_secs(1), app_state_lock.sht30.read()).await {
+            Ok(Ok(sht30::Reading {
                 temperature,
                 humidity,
                 heater_status,
@@ -82,7 +81,7 @@ impl MetricsRender for PicoClimateMetrics {
                 temperature_tracking_alert,
                 command_status_success,
                 write_data_checksum_status,
-            }) => {
+            })) => {
                 chunk_writer
                     .write(gauge(
                         "sht30_reading",
@@ -124,6 +123,10 @@ impl MetricsRender for PicoClimateMetrics {
                     ))
                     .await?;
             }
+            Ok(Err(e)) => {
+                error!("Error reading from sht30: {:?}", e);
+                app_state_lock.sht30_errors += 1;
+            }
             Err(e) => {
                 error!("Got error reading from sht30: {:?}", e);
                 app_state_lock.sht30_errors += 1;
@@ -140,8 +143,8 @@ impl MetricsRender for PicoClimateMetrics {
             .await?;
 
         if app_state_lock.has_ina237 {
-            match app_state_lock.read_i2c_ina237().await {
-                Ok(reading) => {
+            match with_timeout(Duration::from_secs(1), app_state_lock.ina237.read()).await {
+                Ok(Ok(reading)) => {
                     chunk_writer
                         .write(gauge(
                             "ina237_reading",
@@ -158,22 +161,25 @@ impl MetricsRender for PicoClimateMetrics {
                         ))
                         .await?
                 }
+                Ok(Err(e)) => {
+                    error!("Error reading from ina237: {:?}", e);
+                    app_state_lock.ina237_errors += 1
+                }
+
                 Err(e) => {
                     error!("Error reading from ina237: {:?}", e);
                     app_state_lock.ina237_errors += 1
-                },
+                }
             };
 
-            chunk_writer.write(
-                counter(
+            chunk_writer
+                .write(counter(
                     "ina237_errors",
                     "Errors reading from ina237",
                     [],
-                    [
-                        Sample::new([], app_state_lock.ina237_errors as f32)
-                    ].iter()
-                )
-            ).await?;
+                    [Sample::new([], app_state_lock.ina237_errors as f32)].iter(),
+                ))
+                .await?;
         }
 
         Ok(())
@@ -192,25 +198,27 @@ async fn metrics(
     ChunkedResponse::new(MetricsResponse::new(PicoClimateMetrics { app_state }))
 }
 
+static STATE: StaticCell<Mutex<State<I2cDevice<'static, CriticalSectionRawMutex, I2c0>>>> =
+    StaticCell::new();
+
 #[derive(Clone, Copy)]
 pub struct AppState {
-    state: &'static Mutex<State>,
+    state: &'static Mutex<State<I2cDevice<'static, CriticalSectionRawMutex, I2c0>>>,
 }
 
 impl AppState {
     pub async fn new(
         adc_temp_sensor: &'static mut adc_temp_sensor::Sensor<'static>,
-        mut i2c: I2c<'static, I2C0, Async>,
+        i2c_bus: &'static I2c0Bus,
     ) -> Result<Self, embassy_rp::i2c::Error> {
-        i2c.write_async(SHT30_ADDR, [0x30, 0xA2]).await?;
-
-        static STATE: StaticCell<Mutex<State>> = StaticCell::new();
         let state = STATE.init(Mutex::new(State {
             count: [Sample::new([], 0.)],
             adc_temp_sensor,
             sht30_errors: 0,
             ina237_errors: 0,
-            i2c,
+            i2c: I2cDevice::new(&i2c_bus),
+            sht30: Sht30Device::new(I2cDevice::new(&i2c_bus), SHT30_ADDR),
+            ina237: Ina237::new(I2cDevice::new(&i2c_bus), INA237_DEFAULT_ADDR),
             has_ina237: false,
             wifi_signal: [
                 // RSSI
@@ -893,7 +901,16 @@ impl AppState {
 
         {
             let mut lock = state.lock().await;
-            match lock.init_i2c_ina237().await {
+
+            // Initialize SHT30 sensor
+            if let Err(e) = lock.sht30.soft_reset().await {
+                error!("Failed to initialize SHT30: {:?}", e);
+            } else {
+                info!("SHT30 initialized");
+            }
+
+            // Initialize INA237 power meter if present
+            match with_timeout(Duration::from_secs(1), lock.ina237.init()).await {
                 Ok(_) => {
                     info!("Found INA237 Power Meter");
                     lock.has_ina237 = true;
@@ -906,104 +923,33 @@ impl AppState {
         Ok(AppState { state })
     }
 }
+
 impl Deref for AppState {
-    type Target = Mutex<State>;
+    type Target = Mutex<State<I2cDevice<'static, CriticalSectionRawMutex, I2c0>>>;
     fn deref(&self) -> &Self::Target {
         self.state
     }
 }
 
-pub struct State {
+pub struct State<I: I2c> {
     adc_temp_sensor: &'static mut adc_temp_sensor::Sensor<'static>,
     count: [Sample<'static, 0>; 1],
     pub sht30_errors: usize,
     pub ina237_errors: usize,
-    pub i2c: I2c<'static, I2C0, Async>,
+    pub i2c: I,
+    pub sht30: Sht30Device<I>,
+    pub ina237: Ina237<I>,
     pub has_ina237: bool,
     pub wifi_signal: [HistogramSamples<'static, 3, 11>; 14 * 3],
-}
-struct I2CReading {
-    temperature: f32,
-    humidity: f32,
-    heater_status: bool,
-    humidity_tracking_alert: bool,
-    temperature_tracking_alert: bool,
-    command_status_success: bool,
-    write_data_checksum_status: bool,
-}
-
-#[derive(Debug, Format)]
-enum Sht30Error {
-    I2cError(embassy_rp::i2c::Error),
-    Timeout(TimeoutError),
-}
-
-impl From<embassy_rp::i2c::Error> for Sht30Error {
-    fn from(value: embassy_rp::i2c::Error) -> Self {
-        Sht30Error::I2cError(value)
-    }
-}
-
-impl From<TimeoutError> for Sht30Error {
-    fn from(value: TimeoutError) -> Self {
-        Sht30Error::Timeout(value)
-    }
-}
-
-impl State {
-    async fn read_i2c_sht30(&mut self) -> Result<I2CReading, Sht30Error> {
-        with_timeout(Duration::from_secs(1), async {
-            self.i2c.write_async(SHT30_ADDR, SHT30_CLEAR_STATUS).await?;
-            self.i2c
-                .write_async(SHT30_ADDR, SHT30_HIG_REP_CLOCK_STRETCH_READ)
-                .await?;
-
-            // Read 6 bytes of data
-            let mut buffer = [0u8; 6];
-            self.i2c.read_async(SHT30_ADDR, &mut buffer).await?;
-
-            // Parse temperature data (first 3 bytes)
-            let temp_raw = ((buffer[0] as u16) << 8) | (buffer[1] as u16);
-            // Skip CRC check for simplicity (buffer[2] is CRC)
-
-            // Parse humidity data (next 3 bytes)
-            let hum_raw = ((buffer[3] as u16) << 8) | (buffer[4] as u16);
-            // Skip CRC check for simplicity (buffer[5] is CRC)
-
-            // Convert to actual values
-            let temperature = -45.0 + 175.0 * (temp_raw as f32) / 65535.0;
-            let humidity = 100.0 * (hum_raw as f32) / 65535.0;
-
-            self.i2c.write_async(SHT30_ADDR, SHT30_READ_STATUS).await?;
-            self.i2c.read_async(SHT30_ADDR, &mut buffer).await?;
-
-            let status: u16 = ((buffer[0] as u16) << 8) | (buffer[1] as u16);
-
-            let heater_status = status & 0b010000000000000 != 0;
-            let humidity_tracking_alert = status & 0b000100000000000 != 0;
-            let temperature_tracking_alert = status & 0b000010000000000 != 0;
-            let command_status_success = status & 0b000000000000010 != 0;
-            let write_data_checksum_status = status & 0b000000000000001 != 0;
-
-            Ok(I2CReading {
-                temperature,
-                humidity,
-                heater_status,
-                humidity_tracking_alert,
-                temperature_tracking_alert,
-                command_status_success,
-                write_data_checksum_status,
-            })
-        }).await?
-
-    }
 }
 
 #[embassy_executor::task(pool_size = 8)]
 pub async fn web_task(id: usize, stack: &'static Stack<'static>, app_state: &'static AppState) {
-    let app = picoserve::Router::new().route("/metrics", get(metrics)).with_state(app_state);
+    let app = picoserve::Router::new()
+        .route("/metrics", get(metrics))
+        .with_state(app_state);
 
-    if let Err(e) = app_state.state.lock().await.read_i2c_sht30().await {
+    if let Err(e) = app_state.state.lock().await.sht30.read().await {
         error!("Got error reading i2c: {:?}", e);
     }
 
@@ -1018,13 +964,8 @@ pub async fn web_task(id: usize, stack: &'static Stack<'static>, app_state: &'st
         let mut rx_buffer = [0; 1012];
         let mut tx_buffer = [0; 1012];
         let mut http_buffer = [0; 1012];
-        let _ = picoserve::Server::new(&app, &config, &mut http_buffer).listen_and_serve(
-            id,
-            *stack,
-            80,
-            &mut rx_buffer,
-            &mut tx_buffer,
-        )
-        .await;
+        let _ = picoserve::Server::new(&app, &config, &mut http_buffer)
+            .listen_and_serve(id, *stack, 80, &mut rx_buffer, &mut tx_buffer)
+            .await;
     }
 }
