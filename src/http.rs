@@ -4,7 +4,7 @@ use defmt::{error, info};
 use embassy_embedded_hal::shared_bus::asynch::i2c::I2cDevice;
 use embassy_net::Stack;
 use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
-use embassy_time::{with_timeout, Duration, Instant};
+use embassy_time::{Duration, Instant, Timer, with_timeout};
 use embedded_hal_async::i2c::I2c;
 use picoserve::response::chunked::ChunkedResponse;
 use picoserve::response::IntoResponse;
@@ -12,7 +12,7 @@ use picoserve::routing::get;
 
 use static_cell::StaticCell;
 
-use crate::ina237::{Ina237, INA237_DEFAULT_ADDR};
+use crate::ina237::{self, INA237_DEFAULT_ADDR, Ina237};
 use crate::prometheus::sample::Sample;
 use crate::prometheus::{
     counter, gauge, histogram, HistogramSamples, MetricWriter, MetricsRender, MetricsResponse,
@@ -143,7 +143,7 @@ impl MetricsRender for PicoClimateMetrics {
             .await?;
 
         if let Some(ina237) = &mut app_state_lock.ina237 {
-            match with_timeout(Duration::from_secs(1), ina237.read()).await {
+            match with_timeout(Duration::from_secs(100), ina237.read()).await {
                 Ok(Ok(reading)) => {
                     chunk_writer
                         .write(gauge(
@@ -212,6 +212,20 @@ impl AppState {
         i2c_bus: &'static I2c0Bus,
     ) -> Result<Self, embassy_rp::i2c::Error> {
         let ina237 = Ina237::new(I2cDevice::new(&i2c_bus), INA237_DEFAULT_ADDR).await.ok();
+        let ina237 = match ina237 {
+            Some(mut ina237) => {
+                loop {
+                    match ina237.reset().await {
+                        Ok(_) => break Some(ina237),
+                        Err(e) => {
+                            error!("Failed to reset ina237: #{:?}", e);
+                            break None;
+                        }
+                    }
+                }
+            },
+            None => None
+        };
         let state = STATE.init(Mutex::new(State {
             count: [Sample::new([], 0.)],
             adc_temp_sensor,
@@ -911,7 +925,7 @@ impl AppState {
 
             // Initialize INA237 power meter if present
             if let Some(ina237) = &mut lock.ina237 {
-                match with_timeout(Duration::from_secs(1), ina237.init()).await {
+                match with_timeout(Duration::from_secs(100), ina237.init()).await {
                     Ok(_) => {
                         info!("INA237 Power Meter initialized");
                     }

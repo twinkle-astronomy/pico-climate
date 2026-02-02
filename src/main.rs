@@ -93,7 +93,7 @@ async fn main(spawner: Spawner) {
     let scl = p.PIN_5; // GPIO5 as SCL
 
     let mut config = i2c::Config::default();
-    config.frequency = 100_000; // 100kHz
+    // config.frequency = 200_000; // 100kHz
 
     let i2c_bus = I2C_BUS_0.init(Mutex::new(I2c::new_async(p.I2C0, scl, sda, Irqs, config)));
 

@@ -2,7 +2,7 @@ use embedded_hal::i2c::ErrorType;
 
 use defmt::{debug, error, info, Format};
 
-use embassy_time::Timer;
+use embassy_time::{Instant, Timer};
 
 // INA237 Register Addresses
 const INA237_REG_CONFIG: u8 = 0x00;
@@ -146,15 +146,18 @@ where
     }
 
     pub async fn init(&mut self) -> Result<(), Ina237Error<I>> {
-        info!("Resetting");
-        // Reset device and accumulation registers
-        self.write_register(INA237_REG_CONFIG, INA237_CONFIG_RST).await?;
+        // let config: u16 = 0b0_0_00000010_0_0_0000;
+        let config = INA237_MODE_TRIG_ALL
+            | INA237_VBUSCT_4120US
+            | INA237_VSHCT_4120US
+            | INA237_VTCT_4120US
+            | INA237_AVG_4;
+        // info!("config: {:b}", config);
+        self.write_register(INA237_REG_ADC_CONFIG, config).await?;
         Timer::after_millis(100).await;
 
-        let config: u16 = 0b0_0_00000010_0_0_0000;
-        info!("config: {}", config);
-        self.write_register(INA237_REG_CONFIG, config).await?;
-        Timer::after_millis(100).await;
+        let config = INA237_DIAG_ALATCH | INA237_DIAG_CNVR;
+        self.write_register(INA237_REG_DIAG_ALRT, config).await?;
 
         let calib = (819.2e6 * CURRENT_LSB * 0.015) as u16;
         info!("calib: {}", calib);
@@ -167,33 +170,60 @@ where
         Ok(())
     }
 
+    pub async fn reset(&mut self) -> Result<(), Ina237Error<I>> {
+        info!("Resetting");
+        // Reset device and accumulation registers
+        self.write_register(INA237_REG_CONFIG, INA237_CONFIG_RST)
+            .await?;
+        Timer::after_millis(100).await;
+        Ok(())
+    }
+
     // Keep original method for compatibility
     pub async fn read(&mut self) -> Result<Reading, Ina237Error<I>> {
-        // info!("READING INA23x");
-        let config: u16 = 0b0111_000_000_000_010;
+        info!("****************READING INA23x**************");
+        // let config: u16 = 0b0111_000_000_000_010;
+        // self.write_register(INA237_REG_ADC_CONFIG, config).await?;
+        let config = INA237_MODE_TRIG_ALL
+            | INA237_VBUSCT_4120US
+            | INA237_VSHCT_4120US
+            | INA237_VTCT_4120US
+            | INA237_AVG_1;
+        // info!("config: {:b}", config);
         self.write_register(INA237_REG_ADC_CONFIG, config).await?;
-
+        let start_time = Instant::now();
+        Timer::after_millis(1).await;
         loop {
+            info!("checking value ready");
             let diag_alrt = self.read_register(INA237_REG_DIAG_ALRT).await?;
+            info!("diag_alert: {:016b}", diag_alrt);
 
-            if diag_alrt & 0b10 != 0 {
+            if diag_alrt & INA237_DIAG_CNVRF != 0 {
+                info!("value ready");
                 break;
             }
-            Timer::after_millis(10).await;
+            // info!("value not ready");
+            Timer::after_millis(1).await;
         }
-        Timer::after_millis(100).await;
+        info!("Time to get value: {}ms", start_time.elapsed().as_millis());
+        Timer::after_millis(1).await;
 
         let die_temperature = self.read_die_temperature().await?;
+        Timer::after_millis(1).await;
         let bus_voltage = self.read_bus_voltage().await?;
+        Timer::after_millis(1).await;
         let shunt_voltage = self.read_shunt_voltage().await?;
+        Timer::after_millis(1).await;
         let current = self.read_current().await?;
-        let power = 0.; //self.read_power().await?;
+        Timer::after_millis(1).await;
+        let power = self.read_power().await?;
 
-        // info!("read_bus_voltage: {}", bus_voltage);
-        // info!("read_shunt_voltage: {}", shunt_voltage);
-        // info!("read_current: {}", current);
-        // info!("read_power: {}", power);
-        // info!("read_die_temperature: {}", die_temperature);
+        info!("bus_voltage: {}", bus_voltage);
+        info!("shunt_voltage: {}", shunt_voltage);
+        info!("current: {}", current);
+        info!("power: {}", power);
+        info!("die_temperature: {}", die_temperature);
+        // Timer::after_millis(10).await;
 
         Ok(Reading {
             bus_voltage,
@@ -213,6 +243,7 @@ where
     }
 
     pub async fn read_die_temperature(&mut self) -> Result<f32, Ina237Error<I>> {
+        info!("read_die_temperature()");
         let raw_temp = self.read_register_i16(INA237_REG_DIE_TEMP).await?;
 
         let raw_temp = raw_temp >> 4;
@@ -222,6 +253,7 @@ where
     }
 
     pub async fn read_shunt_voltage(&mut self) -> Result<f32, Ina237Error<I>> {
+        info!("read_shunt_voltage()");
         let raw_voltage = self.read_register(INA237_REG_SHUNT_VOLTAGE).await? as i16;
 
         // info!("raw_shunt_voltage: {}", raw_voltage);
@@ -231,6 +263,7 @@ where
     }
 
     pub async fn read_current(&mut self) -> Result<f32, Ina237Error<I>> {
+        info!("read_current()");
         let raw_current = self.read_register(INA237_REG_CURRENT).await? as i16;
         // Current = raw_value × current_lsb
         let current = (raw_current as f32) * CURRENT_LSB;
@@ -238,6 +271,7 @@ where
     }
 
     pub async fn read_power(&mut self) -> Result<f32, Ina237Error<I>> {
+        info!("read_power()");
         let raw_power = self.read_register(INA237_REG_POWER).await?;
         // Power = raw_value × power_lsb
         let power = (raw_power as f32) * POWER_LSB;
@@ -247,10 +281,25 @@ where
     async fn read_register(&mut self, register: u8) -> Result<u16, Ina237Error<I>> {
         let mut buffer = [0u8; 2];
 
-        self.i2c
-            .write_read(self.addr, &[register], &mut buffer)
-            .await
-            .map_err(Ina237Error::I2cError)?;
+        let mut attempts = 1;
+        loop {
+            match self
+                .i2c
+                .write_read(self.addr, &[register], &mut buffer)
+                .await
+                .map_err(Ina237Error::I2cError) {
+                    Ok(_) => break,
+                    Err(e) => {
+                        if attempts == 3 {
+                            return Err(e)
+                        }
+
+                        attempts +=1;
+                        Timer::after_millis(1).await;
+                        info!("retrying");
+                    }
+                }
+        }
 
         Ok(u16::from_be_bytes(buffer))
     }
