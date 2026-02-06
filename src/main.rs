@@ -1,12 +1,15 @@
 #![no_std]
 #![no_main]
+use embassy_rp::multicore::spawn_core1;
+use pico_climate::ina237::{INA237_DEFAULT_ADDR, Output as Ina237Output};
 
 use cyw43::{JoinOptions, ScanOptions};
 use cyw43_pio::PioSpi;
-use embassy_executor::Spawner;
+use embassy_executor::{Executor, Spawner};
 use embassy_rp::adc::{Adc, Channel};
 use embassy_rp::i2c::{self, I2c};
-use embassy_rp::peripherals::{DMA_CH0, I2C0, PIO0};
+use embassy_rp::multicore::Stack as MulticoreStack;
+use embassy_rp::peripherals::{DMA_CH0, I2C0, I2C1, PIO0};
 use embassy_rp::watchdog::Watchdog;
 use embassy_rp::{
     bind_interrupts,
@@ -16,8 +19,11 @@ use embassy_rp::{
 use embassy_time::{Duration, Timer};
 use panic_probe as _;
 use pico_climate::http::{web_task, AppState, LAST_REQUEST_TIME};
-use pico_climate::{adc_temp_sensor, Mutex, I2C_BUS_0};
+use pico_climate::ina237::{continuous_reading, ContinuousReading, Ina237};
+use pico_climate::{I2C_BUS_0, I2C_BUS_1, Mutex, adc_temp_sensor};
 // use pico_climate::tcp_logger::tcp_logger_task;
+use embassy_embedded_hal::shared_bus::asynch::i2c::I2cDevice;
+use portable_atomic::AtomicF32;
 use static_cell::StaticCell;
 
 use core::fmt::Write;
@@ -30,7 +36,10 @@ bind_interrupts!(struct Irqs {
     PIO0_IRQ_0 => InterruptHandler<PIO0>;
     ADC_IRQ_FIFO => embassy_rp::adc::InterruptHandler;
     I2C0_IRQ => i2c::InterruptHandler<I2C0>;
+    I2C1_IRQ => i2c::InterruptHandler<I2C1>;
 });
+
+static INA237: StaticCell<ContinuousReading> = StaticCell::new();
 
 defmt::timestamp!("{=u64:us}", embassy_time::Instant::now().as_micros());
 
@@ -70,6 +79,13 @@ async fn watchdog_feeder(mut watchdog: Watchdog) {
         Timer::after(Duration::from_secs(1)).await;
     }
 }
+static mut CORE1_STACK: MulticoreStack<4096> = MulticoreStack::new();
+static EXECUTOR1: StaticCell<Executor> = StaticCell::new();
+static INA237_READING: Ina237Output = Ina237Output {
+    bus_voltage: AtomicF32::new(0.),
+    shunt_voltage: AtomicF32::new(0.),
+    current: AtomicF32::new(0.),
+};
 
 #[embassy_executor::main]
 async fn main(spawner: Spawner) {
@@ -87,15 +103,39 @@ async fn main(spawner: Spawner) {
     static TEMP_SENSOR: StaticCell<adc_temp_sensor::Sensor> = StaticCell::new();
     let temp_sensor = TEMP_SENSOR.init(adc_temp_sensor::Sensor { temp_sensor, adc });
 
+    info!("Booting!");
     //STH30 Sensor
     // Configure I2C
-    let sda = p.PIN_4; // GPIO4 as SDA
-    let scl = p.PIN_5; // GPIO5 as SCL
 
-    let mut config = i2c::Config::default();
+    info!("Booting!");
+    let config = i2c::Config::default();
     // config.frequency = 200_000; // 100kHz
 
-    let i2c_bus = I2C_BUS_0.init(Mutex::new(I2c::new_async(p.I2C0, scl, sda, Irqs, config)));
+    let i2c_bus0 = I2C_BUS_0.init(Mutex::new(I2c::new_async(p.I2C0, p.PIN_5, p.PIN_4, Irqs, config)));
+    info!("Booting!");
+    let i2c_bus1 = I2C_BUS_1.init(Mutex::new(I2c::new_async(p.I2C1, p.PIN_7, p.PIN_6, Irqs, config)));
+    info!("Booting!");
+
+    if let Some(device) = Ina237::new(I2cDevice::new(i2c_bus0), INA237_DEFAULT_ADDR)
+        .await
+        .ok()
+    {
+        
+        let cr = INA237.init(ContinuousReading {
+            device,
+            reading: &INA237_READING,
+        });
+        spawn_core1(
+            p.CORE1,
+            unsafe { &mut *core::ptr::addr_of_mut!(CORE1_STACK) },
+            move || {
+                let executor1 = EXECUTOR1.init(Executor::new());
+                executor1.run(|spawner| spawner.must_spawn(continuous_reading(cr)));
+            },
+        );
+
+        // spawner.must_spawn(continuous_reading(cr));
+    }
 
     let mut flash =
         embassy_rp::flash::Flash::<_, embassy_rp::flash::Async, { 2 * 1024 * 1024 }>::new(
@@ -157,7 +197,7 @@ async fn main(spawner: Spawner) {
 
     static APP_STATE: StaticCell<AppState> = StaticCell::new();
 
-    let app_state = APP_STATE.init(AppState::new(temp_sensor, i2c_bus).await.unwrap());
+    let app_state = APP_STATE.init(AppState::new(temp_sensor, i2c_bus0, Some(&INA237_READING)).await.unwrap());
 
     // spawner.must_spawn(tcp_logger_task(stack, "ryzen.lan", 9091));
     for id in 0..8 {

@@ -1,10 +1,11 @@
 use core::ops::Deref;
+use core::sync::atomic::Ordering;
 
 use defmt::{error, info};
 use embassy_embedded_hal::shared_bus::asynch::i2c::I2cDevice;
 use embassy_net::Stack;
 use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
-use embassy_time::{Duration, Instant, Timer, with_timeout};
+use embassy_time::{Duration, Instant, with_timeout};
 use embedded_hal_async::i2c::I2c;
 use picoserve::response::chunked::ChunkedResponse;
 use picoserve::response::IntoResponse;
@@ -12,7 +13,7 @@ use picoserve::routing::get;
 
 use static_cell::StaticCell;
 
-use crate::ina237::{self, INA237_DEFAULT_ADDR, Ina237};
+use crate::ina237::Output;
 use crate::prometheus::sample::Sample;
 use crate::prometheus::{
     counter, gauge, histogram, HistogramSamples, MetricWriter, MetricsRender, MetricsResponse,
@@ -143,34 +144,21 @@ impl MetricsRender for PicoClimateMetrics {
             .await?;
 
         if let Some(ina237) = &mut app_state_lock.ina237 {
-            match with_timeout(Duration::from_secs(100), ina237.read()).await {
-                Ok(Ok(reading)) => {
                     chunk_writer
                         .write(gauge(
                             "ina237_reading",
                             "register values from INA237 Sensor",
                             ["register"],
                             [
-                                Sample::new(["bus_voltage"], reading.bus_voltage),
-                                Sample::new(["shunt_voltage"], reading.shunt_voltage),
-                                Sample::new(["current"], reading.current),
-                                Sample::new(["power"], reading.power),
-                                Sample::new(["die_temperature"], reading.die_temperature),
+                                Sample::new(["bus_voltage"], ina237.bus_voltage.load(Ordering::Relaxed)),
+                                Sample::new(["shunt_voltage"], ina237.shunt_voltage.load(Ordering::Relaxed)),
+                                Sample::new(["current"], ina237.current.load(Ordering::Relaxed)),
+                                Sample::new(["power"], 0.),
+                                Sample::new(["die_temperature"], 0.),
                             ]
                             .iter(),
                         ))
-                        .await?
-                }
-                Ok(Err(e)) => {
-                    error!("Error reading from ina237: {:?}", e);
-                    app_state_lock.ina237_errors += 1
-                }
-
-                Err(e) => {
-                    error!("Error reading from ina237: {:?}", e);
-                    app_state_lock.ina237_errors += 1
-                }
-            };
+                        .await?;
 
             chunk_writer
                 .write(counter(
@@ -210,22 +198,9 @@ impl AppState {
     pub async fn new(
         adc_temp_sensor: &'static mut adc_temp_sensor::Sensor<'static>,
         i2c_bus: &'static I2c0Bus,
+        ina237: Option<&'static Output>,
     ) -> Result<Self, embassy_rp::i2c::Error> {
-        let ina237 = Ina237::new(I2cDevice::new(&i2c_bus), INA237_DEFAULT_ADDR).await.ok();
-        let ina237 = match ina237 {
-            Some(mut ina237) => {
-                loop {
-                    match ina237.reset().await {
-                        Ok(_) => break Some(ina237),
-                        Err(e) => {
-                            error!("Failed to reset ina237: #{:?}", e);
-                            break None;
-                        }
-                    }
-                }
-            },
-            None => None
-        };
+
         let state = STATE.init(Mutex::new(State {
             count: [Sample::new([], 0.)],
             adc_temp_sensor,
@@ -922,20 +897,6 @@ impl AppState {
             } else {
                 info!("SHT30 initialized");
             }
-
-            // Initialize INA237 power meter if present
-            if let Some(ina237) = &mut lock.ina237 {
-                match with_timeout(Duration::from_secs(100), ina237.init()).await {
-                    Ok(_) => {
-                        info!("INA237 Power Meter initialized");
-                    }
-                    Err(e) => {
-                        error!("Failed to initialize INA237: {:?}", e);
-                    }
-                }
-            } else {
-                info!("INA237 Power Meter not found");
-            }
         }
         Ok(AppState { state })
     }
@@ -955,7 +916,7 @@ pub struct State<I: I2c> {
     pub ina237_errors: usize,
     pub i2c: I,
     pub sht30: Sht30Device<I>,
-    pub ina237: Option<Ina237<I>>,
+    pub ina237: Option<&'static Output>,
     pub wifi_signal: [HistogramSamples<'static, 3, 11>; 14 * 3],
 }
 
