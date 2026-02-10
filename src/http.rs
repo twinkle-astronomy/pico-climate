@@ -1,26 +1,22 @@
 use core::ops::Deref;
 use core::sync::atomic::Ordering;
 
-use defmt::{error, info};
-use embassy_embedded_hal::shared_bus::asynch::i2c::I2cDevice;
+use defmt::info;
 use embassy_net::Stack;
-use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
-use embassy_time::{Duration, Instant, with_timeout};
-use embedded_hal_async::i2c::I2c;
+use embassy_time::{Duration, Instant};
 use picoserve::response::chunked::ChunkedResponse;
 use picoserve::response::IntoResponse;
 use picoserve::routing::get;
 
 use static_cell::StaticCell;
 
-use crate::ina237::Output;
+use crate::ina237::{self, Output};
 use crate::prometheus::sample::Sample;
 use crate::prometheus::{
     counter, gauge, histogram, HistogramSamples, MetricWriter, MetricsRender, MetricsResponse,
 };
-use crate::sht30::{Sht30Device, SHT30_ADDR};
 use crate::{adc_temp_sensor, Mutex};
-use crate::{sht30, I2c0, I2c0Bus};
+use crate::sht30;
 
 pub static LAST_REQUEST_TIME: Mutex<Instant> = Mutex::new(Instant::MIN);
 
@@ -73,66 +69,99 @@ impl MetricsRender for PicoClimateMetrics {
                 .await?;
         }
 
-        match with_timeout(Duration::from_secs(1), app_state_lock.sht30.read()).await {
-            Ok(Ok(sht30::Reading {
-                temperature,
-                humidity,
-                heater_status,
-                humidity_tracking_alert,
-                temperature_tracking_alert,
-                command_status_success,
-                write_data_checksum_status,
-            })) => {
-                chunk_writer
-                    .write(gauge(
-                        "sht30_reading",
-                        "Reading from SHT30 Sensor",
-                        ["sensor"],
-                        [
-                            Sample::new(["temperature"], temperature),
-                            Sample::new(["humidity"], humidity),
-                        ]
-                        .iter(),
-                    ))
-                    .await?;
+        chunk_writer
+            .write(gauge(
+                "sht30_reading",
+                "Reading from SHT30 Sensor",
+                ["sensor"],
+                [
+                    Sample::new(
+                        ["temperature"],
+                        app_state_lock.sht30.temperature.load(Ordering::Relaxed),
+                    ),
+                    Sample::new(
+                        ["humidity"],
+                        app_state_lock.sht30.humidity.load(Ordering::Relaxed),
+                    ),
+                ]
+                .iter(),
+            ))
+            .await?;
 
-                chunk_writer
-                    .write(gauge(
-                        "sht30_status",
-                        "SHT30 Status Registers",
-                        ["feature"],
-                        [
-                            Sample::new(["heater_status"], if heater_status { 1. } else { 0. }),
-                            Sample::new(
-                                ["humidity_tracking_alert"],
-                                if humidity_tracking_alert { 1. } else { 0. },
-                            ),
-                            Sample::new(
-                                ["temperature_tracking_alert"],
-                                if temperature_tracking_alert { 1. } else { 0. },
-                            ),
-                            Sample::new(
-                                ["command_status_success"],
-                                if command_status_success { 1. } else { 0. },
-                            ),
-                            Sample::new(
-                                ["write_data_checksum_status"],
-                                if write_data_checksum_status { 1. } else { 0. },
-                            ),
-                        ]
-                        .iter(),
-                    ))
-                    .await?;
-            }
-            Ok(Err(e)) => {
-                error!("Error reading from sht30: {:?}", e);
-                app_state_lock.sht30_errors += 1;
-            }
-            Err(e) => {
-                error!("Got error reading from sht30: {:?}", e);
-                app_state_lock.sht30_errors += 1;
-            }
-        };
+        chunk_writer
+            .write(counter(
+                "sht30_status_count",
+                "Number of times SHT30 Status Registers have been true",
+                ["feature"],
+                [
+                    Sample::new(
+                        ["heater_status"],
+                        app_state_lock
+                            .sht30
+                            .heater_status_count
+                            .load(Ordering::Relaxed),
+                    ),
+                    Sample::new(
+                        ["humidity_tracking_alert"],
+                        app_state_lock
+                            .sht30
+                            .humidity_tracking_alert_count
+                            .load(Ordering::Relaxed),
+                    ),
+                    Sample::new(
+                        ["temperature_tracking_alert"],
+                        app_state_lock
+                            .sht30
+                            .temperature_tracking_alert_count
+                            .load(Ordering::Relaxed),
+                    ),
+                    Sample::new(
+                        ["command_status_success"],
+                        app_state_lock
+                            .sht30
+                            .command_status_success_count
+                            .load(Ordering::Relaxed),
+                    ),
+                    Sample::new(
+                        ["write_data_checksum_status"],
+                        app_state_lock
+                            .sht30
+                            .write_data_checksum_status_count
+                            .load(Ordering::Relaxed),
+                    ),
+                ]
+                .iter(),
+            ))
+            .await?;
+
+        chunk_writer
+            .write(counter(
+                "sht30_zeros",
+                "Zero readings from SHT30 Sensor",
+                [],
+                [Sample::new(
+                    [],
+                    app_state_lock.sht30.zeros.load(Ordering::Relaxed),
+                )]
+                .iter(),
+            ))
+            .await?;
+
+        chunk_writer
+            .write(counter(
+                "sht30_recoverable_errors",
+                "Recoverable erors from SHT30 Sensor",
+                [],
+                [Sample::new(
+                    [],
+                    app_state_lock
+                        .sht30
+                        .recoverable_errors
+                        .load(Ordering::Relaxed),
+                )]
+                .iter(),
+            ))
+            .await?;
 
         chunk_writer
             .write(counter(
@@ -144,21 +173,46 @@ impl MetricsRender for PicoClimateMetrics {
             .await?;
 
         if let Some(ina237) = &mut app_state_lock.ina237 {
-                    chunk_writer
-                        .write(gauge(
-                            "ina237_reading",
-                            "register values from INA237 Sensor",
-                            ["register"],
-                            [
-                                Sample::new(["bus_voltage"], ina237.bus_voltage.load(Ordering::Relaxed)),
-                                Sample::new(["shunt_voltage"], ina237.shunt_voltage.load(Ordering::Relaxed)),
-                                Sample::new(["current"], ina237.current.load(Ordering::Relaxed)),
-                                Sample::new(["power"], 0.),
-                                Sample::new(["die_temperature"], 0.),
-                            ]
-                            .iter(),
-                        ))
-                        .await?;
+            chunk_writer
+                .write(gauge(
+                    "ina237_reading",
+                    "register values from INA237 Sensor",
+                    ["register"],
+                    [
+                        Sample::new(["bus_voltage"], ina237.bus_voltage.load(Ordering::Relaxed)),
+                        Sample::new(
+                            ["shunt_voltage"],
+                            ina237.shunt_voltage.load(Ordering::Relaxed),
+                        ),
+                        Sample::new(["current"], ina237.current.load(Ordering::Relaxed)),
+                        Sample::new(["power"], 0.),
+                        Sample::new(["die_temperature"], 0.),
+                    ]
+                    .iter(),
+                ))
+                .await?;
+
+            chunk_writer
+                .write(counter(
+                    "ina237_zeros",
+                    "Zeroes reading from ina237",
+                    [],
+                    [Sample::new([], ina237.zeros.load(Ordering::Relaxed) as f32)].iter(),
+                ))
+                .await?;
+
+            chunk_writer
+                .write(counter(
+                    "ina237_recoverable_errors",
+                    "Recoverable errors from ina237",
+                    [],
+                    [Sample::new(
+                        [],
+                        ina237.recoverable_errors.load(Ordering::Relaxed) as f32,
+                    )]
+                    .iter(),
+                ))
+                .await?;
 
             chunk_writer
                 .write(counter(
@@ -186,28 +240,27 @@ async fn metrics(
     ChunkedResponse::new(MetricsResponse::new(PicoClimateMetrics { app_state }))
 }
 
-static STATE: StaticCell<Mutex<State<I2cDevice<'static, CriticalSectionRawMutex, I2c0>>>> =
+static STATE: StaticCell<Mutex<State>> =
     StaticCell::new();
 
 #[derive(Clone, Copy)]
 pub struct AppState {
-    state: &'static Mutex<State<I2cDevice<'static, CriticalSectionRawMutex, I2c0>>>,
+    state: &'static Mutex<State>,
 }
 
 impl AppState {
     pub async fn new(
         adc_temp_sensor: &'static mut adc_temp_sensor::Sensor<'static>,
-        i2c_bus: &'static I2c0Bus,
         ina237: Option<&'static Output>,
+        sht30: &'static sht30::Output,
     ) -> Result<Self, embassy_rp::i2c::Error> {
-
         let state = STATE.init(Mutex::new(State {
             count: [Sample::new([], 0.)],
             adc_temp_sensor,
             sht30_errors: 0,
             ina237_errors: 0,
-            i2c: I2cDevice::new(&i2c_bus),
-            sht30: Sht30Device::new(I2cDevice::new(&i2c_bus), SHT30_ADDR),
+            // i2c: I2cDevice::new(&i2c_bus),
+            sht30,
             ina237,
             wifi_signal: [
                 // RSSI
@@ -888,35 +941,26 @@ impl AppState {
             ],
         }));
 
-        {
-            let mut lock = state.lock().await;
-
-            // Initialize SHT30 sensor
-            if let Err(e) = lock.sht30.soft_reset().await {
-                error!("Failed to initialize SHT30: {:?}", e);
-            } else {
-                info!("SHT30 initialized");
-            }
-        }
         Ok(AppState { state })
     }
 }
 
 impl Deref for AppState {
-    type Target = Mutex<State<I2cDevice<'static, CriticalSectionRawMutex, I2c0>>>;
+    type Target = Mutex<State>;
     fn deref(&self) -> &Self::Target {
         self.state
     }
 }
 
-pub struct State<I: I2c> {
+pub struct State {
     adc_temp_sensor: &'static mut adc_temp_sensor::Sensor<'static>,
     count: [Sample<'static, 0>; 1],
     pub sht30_errors: usize,
     pub ina237_errors: usize,
-    pub i2c: I,
-    pub sht30: Sht30Device<I>,
-    pub ina237: Option<&'static Output>,
+    // pub i2c: I,
+    // pub sht30: Sht30Device<I>,
+    pub ina237: Option<&'static ina237::Output>,
+    pub sht30: &'static sht30::Output,
     pub wifi_signal: [HistogramSamples<'static, 3, 11>; 14 * 3],
 }
 
@@ -926,9 +970,9 @@ pub async fn web_task(id: usize, stack: &'static Stack<'static>, app_state: &'st
         .route("/metrics", get(metrics))
         .with_state(app_state);
 
-    if let Err(e) = app_state.state.lock().await.sht30.read().await {
-        error!("Got error reading i2c: {:?}", e);
-    }
+    // if let Err(e) = app_state.state.lock().await.sht30.read().await {
+    //     error!("Got error reading i2c: {:?}", e);
+    // }
 
     loop {
         let config = picoserve::Config::new(picoserve::Timeouts {

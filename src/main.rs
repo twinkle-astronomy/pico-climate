@@ -1,7 +1,7 @@
 #![no_std]
 #![no_main]
 use embassy_rp::multicore::spawn_core1;
-use pico_climate::ina237::{INA237_DEFAULT_ADDR, Output as Ina237Output};
+use pico_climate::ina237::{Output as Ina237Output, INA237_DEFAULT_ADDR};
 
 use cyw43::{JoinOptions, ScanOptions};
 use cyw43_pio::PioSpi;
@@ -20,7 +20,8 @@ use embassy_time::{Duration, Timer};
 use panic_probe as _;
 use pico_climate::http::{web_task, AppState, LAST_REQUEST_TIME};
 use pico_climate::ina237::{continuous_reading, ContinuousReading, Ina237};
-use pico_climate::{I2C_BUS_0, I2C_BUS_1, Mutex, adc_temp_sensor};
+use pico_climate::sht30::Sht30Device;
+use pico_climate::{adc_temp_sensor, sht30, Mutex, I2C_BUS_0};
 // use pico_climate::tcp_logger::tcp_logger_task;
 use embassy_embedded_hal::shared_bus::asynch::i2c::I2cDevice;
 use portable_atomic::AtomicF32;
@@ -40,6 +41,7 @@ bind_interrupts!(struct Irqs {
 });
 
 static INA237: StaticCell<ContinuousReading> = StaticCell::new();
+static SHT30: StaticCell<sht30::ContinuousReading> = StaticCell::new();
 
 defmt::timestamp!("{=u64:us}", embassy_time::Instant::now().as_micros());
 
@@ -85,6 +87,20 @@ static INA237_READING: Ina237Output = Ina237Output {
     bus_voltage: AtomicF32::new(0.),
     shunt_voltage: AtomicF32::new(0.),
     current: AtomicF32::new(0.),
+    zeros: AtomicF32::new(0.),
+    recoverable_errors: AtomicF32::new(0.),
+};
+
+static SHT30_READING: sht30::Output = sht30::Output {
+    temperature: AtomicF32::new(0.),
+    humidity: AtomicF32::new(0.),
+    zeros: AtomicF32::new(0.),
+    recoverable_errors: AtomicF32::new(0.),
+    heater_status_count: AtomicF32::new(0.),
+    humidity_tracking_alert_count: AtomicF32::new(0.),
+    temperature_tracking_alert_count: AtomicF32::new(0.),
+    command_status_success_count: AtomicF32::new(0.),
+    write_data_checksum_status_count: AtomicF32::new(0.),
 };
 
 #[embassy_executor::main]
@@ -97,45 +113,53 @@ async fn main(spawner: Spawner) {
         watchdog.start(Duration::from_secs(5));
         spawner.spawn(watchdog_feeder(watchdog)).unwrap();
     }
+
     //Onboard temp sensor
     let adc = Adc::new(p.ADC, Irqs, embassy_rp::adc::Config::default());
     let temp_sensor = Channel::new_temp_sensor(p.ADC_TEMP_SENSOR);
     static TEMP_SENSOR: StaticCell<adc_temp_sensor::Sensor> = StaticCell::new();
     let temp_sensor = TEMP_SENSOR.init(adc_temp_sensor::Sensor { temp_sensor, adc });
 
-    info!("Booting!");
-    //STH30 Sensor
-    // Configure I2C
+    let i2c_bus0 = I2C_BUS_0.init(Mutex::new(I2c::new_async(
+        p.I2C0,
+        p.PIN_5,
+        p.PIN_4,
+        Irqs,
+        i2c::Config::default(),
+    )));
+    let sht30_device = Sht30Device::new(I2cDevice::new(i2c_bus0), sht30::SHT30_ADDR);
 
-    info!("Booting!");
-    let config = i2c::Config::default();
-    // config.frequency = 200_000; // 100kHz
-
-    let i2c_bus0 = I2C_BUS_0.init(Mutex::new(I2c::new_async(p.I2C0, p.PIN_5, p.PIN_4, Irqs, config)));
-    info!("Booting!");
-    let i2c_bus1 = I2C_BUS_1.init(Mutex::new(I2c::new_async(p.I2C1, p.PIN_7, p.PIN_6, Irqs, config)));
-    info!("Booting!");
-
-    if let Some(device) = Ina237::new(I2cDevice::new(i2c_bus0), INA237_DEFAULT_ADDR)
+    let ina237_device = Ina237::new(I2cDevice::new(i2c_bus0), INA237_DEFAULT_ADDR)
         .await
-        .ok()
-    {
-        
-        let cr = INA237.init(ContinuousReading {
-            device,
-            reading: &INA237_READING,
-        });
-        spawn_core1(
-            p.CORE1,
-            unsafe { &mut *core::ptr::addr_of_mut!(CORE1_STACK) },
-            move || {
-                let executor1 = EXECUTOR1.init(Executor::new());
-                executor1.run(|spawner| spawner.must_spawn(continuous_reading(cr)));
-            },
-        );
+        .ok();
 
-        // spawner.must_spawn(continuous_reading(cr));
-    }
+    let ina237 = if ina237_device.is_some() {
+        Some(&INA237_READING)
+    } else {
+        None
+    };
+
+    spawn_core1(
+        p.CORE1,
+        unsafe { &mut *core::ptr::addr_of_mut!(CORE1_STACK) },
+        move || {
+            let executor1 = EXECUTOR1.init(Executor::new());
+            executor1.run(|spawner| {
+                spawner.must_spawn(sht30::continuous_reading(SHT30.init(
+                    sht30::ContinuousReading {
+                        device: sht30_device,
+                        reading: &SHT30_READING,
+                    },
+                )));
+                if let Some(device) = ina237_device {
+                    spawner.must_spawn(continuous_reading(INA237.init(ContinuousReading {
+                        device,
+                        reading: &INA237_READING,
+                    })))
+                }
+            });
+        },
+    );
 
     let mut flash =
         embassy_rp::flash::Flash::<_, embassy_rp::flash::Async, { 2 * 1024 * 1024 }>::new(
@@ -197,7 +221,11 @@ async fn main(spawner: Spawner) {
 
     static APP_STATE: StaticCell<AppState> = StaticCell::new();
 
-    let app_state = APP_STATE.init(AppState::new(temp_sensor, i2c_bus0, Some(&INA237_READING)).await.unwrap());
+    let app_state = APP_STATE.init(
+        AppState::new(temp_sensor, ina237, &SHT30_READING)
+            .await
+            .unwrap(),
+    );
 
     // spawner.must_spawn(tcp_logger_task(stack, "ryzen.lan", 9091));
     for id in 0..8 {

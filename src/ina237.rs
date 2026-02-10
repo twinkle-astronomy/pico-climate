@@ -7,10 +7,9 @@ use embedded_hal::i2c::ErrorType;
 use defmt::{error, info, Format};
 
 use embassy_time::Timer;
-use heapless::Vec;
 use portable_atomic::AtomicF32;
 
-use crate::I2c0;
+use crate::{I2c0, SampleSet};
 
 // INA237 Register Addresses
 pub const INA237_REG_CONFIG: u8 = 0x00;
@@ -134,15 +133,12 @@ where
 pub struct Ina237<I> {
     addr: u8,
     i2c: I,
-}
-
-fn median<const N: usize>(mut samples: Vec<f32, N>) -> f32 {
-    samples.sort_unstable_by(|a, b| a.total_cmp(b));
-    samples[N / 2]
+    recoverable_errors: usize,
 }
 
 #[embassy_executor::task]
 pub async fn continuous_reading(device: &'static mut ContinuousReading) {
+    
     if let Err(e) = device.device.reset().await {
         error!("Unable to reset ina237: {:?}", e);
     }
@@ -150,36 +146,43 @@ pub async fn continuous_reading(device: &'static mut ContinuousReading) {
         error!("Unable to init ina237: {:?}", e);
     }
 
+    let mut bus_voltages = SampleSet::<11>::new();
+    let mut currents = SampleSet::<11>::new();
+    let mut shunt_voltages = SampleSet::<11>::new();
+
     loop {
-        let mut samples: [Reading; 11] = Default::default();
-        for sample in samples.iter_mut() {
-            device.device.read_until_success().await;
-            if let Ok(v) = device.device.read_bus_voltage().await {
-                sample.bus_voltage = v
+        device.device.read_until_success().await;
+        if let Ok(v) = device.device.read_bus_voltage().await {
+            if v < 10. {
+                error!("Voltage read is less than 10v: {}", v);
+                device.reading.zeros.fetch_add(1., Ordering::Relaxed);
             }
-            if let Ok(v) = device.device.read_current().await {
-                sample.current = v
-            }
-            if let Ok(v) = device.device.read_shunt_voltage().await {
-                sample.shunt_voltage = v
-            }
-            Timer::after_millis(100).await;
+            bus_voltages.record(v);
         }
+        if let Ok(v) = device.device.read_current().await {
+            currents.record(v);
+        }
+        if let Ok(v) = device.device.read_shunt_voltage().await {
+            shunt_voltages.record(v);
+        }
+        Timer::after_millis(100).await;
 
         device.reading.bus_voltage.store(
-            median::<11>(samples.iter().map(|r| r.bus_voltage).collect()),
+            bus_voltages.median(),
             Ordering::Relaxed,
         );
 
         device.reading.current.store(
-            median::<11>(samples.iter().map(|r| r.current).collect()),
+            currents.median(),
             Ordering::Relaxed,
         );
 
         device.reading.shunt_voltage.store(
-            median::<11>(samples.iter().map(|r| r.shunt_voltage).collect()),
+            shunt_voltages.median(),
             Ordering::Relaxed,
         );
+
+        device.reading.recoverable_errors.store(device.device.recoverable_errors as f32, Ordering::Relaxed);
     }
 }
 
@@ -188,11 +191,26 @@ where
     <I as embedded_hal::i2c::ErrorType>::Error: Format,
 {
     pub async fn new(i2c: I, addr: u8) -> Result<Self, Ina237Error<I>> {
-        let mut dev = Self { addr, i2c };
+        let mut dev = Self { addr, i2c, recoverable_errors: 0 };
 
         info!("getting device id");
-        // Check device ID
-        let manuf_id = dev.read_register(INA237_REG_MANUFACTURER_ID).await?;
+        // Check device ID with timeout
+        let manuf_id = match embassy_time::with_timeout(
+            embassy_time::Duration::from_millis(1000),
+            dev.read_register(INA237_REG_MANUFACTURER_ID),
+        )
+        .await
+        {
+            Ok(Ok(id)) => id,
+            Ok(Err(e)) => {
+                error!("I2C error reading manufacturer ID: {:?}", e);
+                return Err(e);
+            }
+            Err(_) => {
+                error!("Timeout reading INA237 - check I2C wiring and pull-up resistors");
+                return Err(Ina237Error::InvalidDeviceId);
+            }
+        };
         info!("manuf_id: {}", manuf_id);
         if manuf_id != 21577 {
             return Err(Ina237Error::InvalidDeviceId);
@@ -251,21 +269,6 @@ where
             }
         }
         Ok(())
-        //     let die_temperature = 0.;
-        //     let bus_voltage = self.read_bus_voltage().await?;
-        //     Timer::after_millis(1).await;
-        //     let shunt_voltage = self.read_shunt_voltage().await?;
-        //     Timer::after_millis(1).await;
-        //     let current = self.read_current().await?;
-        //     let power = 0.;
-
-        //     Ok(Reading {
-        //         bus_voltage: bus_voltage.into(),
-        //         shunt_voltage: shunt_voltage.into(),
-        //         current: current.into(),
-        //         power: power.into(),
-        //         die_temperature: die_temperature.into(),
-        //     })
     }
 
     pub async fn read_bus_voltage(&mut self) -> Result<f32, Ina237Error<I>> {
@@ -331,6 +334,7 @@ where
 
                     attempts += 1;
                     Timer::after_millis(1).await;
+                    self.recoverable_errors += 1;
                     error!("Error reading register {} {:?}", register, e);
                 }
             }
@@ -358,6 +362,7 @@ where
                     }
 
                     attempts += 1;
+                    self.recoverable_errors += 1;
                     Timer::after_millis(1).await;
                     error!("Error reading register {} {:?}", register, e);
                 }
@@ -385,6 +390,7 @@ where
                         return Err(e);
                     }
                     attempts += 1;
+                    self.recoverable_errors += 1;
                     Timer::after_millis(1).await;
                     error!("Error writing register {} {:?}", register, e);
                 }
@@ -409,6 +415,8 @@ pub struct Output {
     pub bus_voltage: AtomicF32,
     pub shunt_voltage: AtomicF32,
     pub current: AtomicF32,
+    pub zeros: AtomicF32,
+    pub recoverable_errors: AtomicF32,
 }
 
 pub struct ContinuousReading {

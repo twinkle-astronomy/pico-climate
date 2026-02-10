@@ -1,4 +1,13 @@
+use core::sync::atomic::Ordering;
+
+use defmt::error;
+use embassy_embedded_hal::shared_bus::asynch::i2c::I2cDevice;
+use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
+use embassy_time::Timer;
 use embedded_hal::i2c::ErrorType;
+use portable_atomic::AtomicF32;
+
+use crate::{I2c0, SampleSet};
 
 // SHT30 I2C Address
 pub const SHT30_ADDR: u8 = 0x44;
@@ -81,4 +90,64 @@ impl<I: embedded_hal_async::i2c::I2c> Sht30Device<I> {
             write_data_checksum_status,
         })
     }
+}
+
+
+#[embassy_executor::task]
+pub async fn continuous_reading(device: &'static mut ContinuousReading) {
+    
+    if let Err(e) = device.device.soft_reset().await {
+        error!("Unable to reset ina237: {:?}", e);
+    }
+
+    let mut humidities = SampleSet::<11>::new();
+    let mut tempuratures = SampleSet::<11>::new();
+
+    loop {
+        Timer::after_millis(100).await;
+        match device.device.read().await {
+            Ok(reading) => {
+                humidities.record(reading.humidity);
+                tempuratures.record(reading.temperature);
+
+                if reading.humidity == 0. || reading.temperature == 0. {
+                    device.reading.zeros.fetch_add(1., Ordering::Relaxed);
+                }
+            },
+            Err(e) => {
+                error!("Error reading sht30: {}", e);
+                device.reading.recoverable_errors.fetch_add(1., Ordering::Relaxed);
+            }
+        }
+
+        device.reading.humidity.store(
+            humidities.median(),
+            Ordering::Relaxed,
+        );
+
+        device.reading.temperature.store(
+            tempuratures.median(),
+            Ordering::Relaxed,
+        );
+
+        // device.reading.recoverable_errors.store(device.device.recoverable_errors as f32, Ordering::Relaxed);
+    }
+}
+
+pub struct ContinuousReading {
+    pub device: Sht30Device<I2cDevice<'static, CriticalSectionRawMutex, I2c0>>,
+    pub reading: &'static Output,
+}
+
+#[derive(Default)]
+pub struct Output {
+    pub temperature: AtomicF32,
+    pub humidity: AtomicF32,
+    pub zeros: AtomicF32,
+    pub recoverable_errors: AtomicF32,
+    pub heater_status_count: AtomicF32,
+    pub humidity_tracking_alert_count: AtomicF32,
+    pub temperature_tracking_alert_count: AtomicF32,
+    pub command_status_success_count: AtomicF32,
+    pub write_data_checksum_status_count: AtomicF32,
 }
