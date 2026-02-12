@@ -21,6 +21,33 @@ pub type I2c0 = embassy_rp::i2c::I2c<'static, I2C0, Async>;
 pub type I2c0Bus = Mutex<I2c0>;
 pub static I2C_BUS_0: StaticCell<I2c0Bus> = StaticCell::new();
 
+pub struct AverageSet {
+    sum: f32,
+    count: usize
+}
+
+impl AverageSet {
+    pub const fn new() -> Self {
+        Self { sum: 0., count: 0 }
+    }
+
+    
+    pub fn record(&mut self, sample: f32) {
+        self.sum += sample;
+        self.count += 1;
+    }
+
+    pub fn avg(&mut self) -> f32 {
+        if self.count == 0 {
+            return 0.0
+        }
+        
+        let avg = self.sum / self.count as f32;
+        self.count = 0;
+        self.sum = 0.;
+        avg
+    }
+}
 
 pub struct SampleSet<const N: usize> {
     samples: [f32;N],
@@ -28,21 +55,13 @@ pub struct SampleSet<const N: usize> {
 }
 
 impl<const N: usize> SampleSet<N> {
-    pub fn new() -> Self {
+    pub const fn new() -> Self {
         Self { samples: [0.; N], count: 0 }
     }
 
     pub fn record(&mut self, sample: f32) {
         self.samples[self.count % N] = sample;
         self.count += 1;
-    }
-
-    pub fn avg(&self) -> f32 {
-        if self.count == 0 {
-            return 0.0
-        }
-        let sample_count = self.sample_count();
-        self.samples.iter().sum::<f32>() / sample_count as f32
     }
 
     pub fn median(&self) -> f32 {

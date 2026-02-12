@@ -1,5 +1,3 @@
-use core::sync::atomic::Ordering;
-
 use embassy_embedded_hal::shared_bus::asynch::i2c::I2cDevice;
 use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
 use embedded_hal::i2c::ErrorType;
@@ -7,9 +5,8 @@ use embedded_hal::i2c::ErrorType;
 use defmt::{error, info, Format};
 
 use embassy_time::Timer;
-use portable_atomic::AtomicF32;
 
-use crate::{I2c0, SampleSet};
+use crate::{AverageSet, I2c0, Mutex, SampleSet};
 
 // INA237 Register Addresses
 pub const INA237_REG_CONFIG: u8 = 0x00;
@@ -121,6 +118,67 @@ const MAX_EXPECTED_CURRENT: f32 = 100.0;
 const CURRENT_LSB: f32 = MAX_EXPECTED_CURRENT / (1 << 15) as f32;
 const POWER_LSB: f32 = 3.2 * CURRENT_LSB;
 
+/// Sensor output returned via channel (includes medians and counters)
+#[derive(Clone, Copy, Default)]
+pub struct Output {
+    pub bus_voltage: f32,
+    pub shunt_voltage: f32,
+    pub current: f32,
+    pub zeros: f32,
+    pub recoverable_errors: f32,
+}
+
+pub struct SharedState {
+    bus_voltages: SampleSet<11>,
+    shunt_voltages: SampleSet<11>,
+    currents: AverageSet,
+    zeros: f32,
+    recoverable_errors: f32,
+}
+
+impl SharedState {
+    pub const fn new() -> Self {
+        Self {
+            bus_voltages: SampleSet::new(),
+            shunt_voltages: SampleSet::new(),
+            currents: AverageSet::new(),
+            zeros: 0.,
+            recoverable_errors: 0.,
+        }
+    }
+
+    pub fn record_bus_voltage(&mut self, v: f32) {
+        if v < 10. {
+            error!("Voltage read is less than 10v: {}", v);
+            self.zeros += 1.;
+        } else {
+            self.bus_voltages.record(v);
+        }
+    }
+
+    pub fn record_current(&mut self, v: f32) {
+        self.currents.record(v);
+    }
+
+    pub fn record_shunt_voltage(&mut self, v: f32) {
+        self.shunt_voltages.record(v);
+    }
+
+    pub fn set_recoverable_errors(&mut self, count: usize) {
+        self.recoverable_errors = count as f32;
+    }
+
+    pub fn snapshot(&mut self) -> Output {
+        Output {
+            bus_voltage: self.bus_voltages.median(),
+            shunt_voltage: self.shunt_voltages.median(),
+            current: self.currents.avg(),
+            zeros: self.zeros,
+            recoverable_errors: self.recoverable_errors,
+        }
+    }
+}
+
 #[derive(Debug, Format)]
 pub enum Ina237Error<I: embedded_hal_async::i2c::I2c>
 where
@@ -137,52 +195,39 @@ pub struct Ina237<I> {
 }
 
 #[embassy_executor::task]
-pub async fn continuous_reading(device: &'static mut ContinuousReading) {
-    
-    if let Err(e) = device.device.reset().await {
+pub async fn continuous_reading(
+    device: &'static mut Ina237<I2cDevice<'static, CriticalSectionRawMutex, I2c0>>,
+    shared: &'static Mutex<SharedState>,
+) {
+    if let Err(e) = device.reset().await {
         error!("Unable to reset ina237: {:?}", e);
     }
-    if let Err(e) = device.device.init().await {
+    if let Err(e) = device.init().await {
         error!("Unable to init ina237: {:?}", e);
     }
 
-    let mut bus_voltages = SampleSet::<11>::new();
-    let mut currents = SampleSet::<11>::new();
-    let mut shunt_voltages = SampleSet::<11>::new();
-
     loop {
-        device.device.read_until_success().await;
-        if let Ok(v) = device.device.read_bus_voltage().await {
-            if v < 10. {
-                error!("Voltage read is less than 10v: {}", v);
-                device.reading.zeros.fetch_add(1., Ordering::Relaxed);
+        device.read_until_success().await;
+
+        let bus_v = device.read_bus_voltage().await;
+        let current = device.read_current().await;
+        let shunt_v = device.read_shunt_voltage().await;
+
+        {
+            let mut state = shared.lock().await;
+            if let Ok(v) = bus_v {
+                state.record_bus_voltage(v);
             }
-            bus_voltages.record(v);
+            if let Ok(v) = current {
+                state.record_current(v);
+            }
+            if let Ok(v) = shunt_v {
+                state.record_shunt_voltage(v);
+            }
+            state.set_recoverable_errors(device.recoverable_errors);
         }
-        if let Ok(v) = device.device.read_current().await {
-            currents.record(v);
-        }
-        if let Ok(v) = device.device.read_shunt_voltage().await {
-            shunt_voltages.record(v);
-        }
+
         Timer::after_millis(100).await;
-
-        device.reading.bus_voltage.store(
-            bus_voltages.median(),
-            Ordering::Relaxed,
-        );
-
-        device.reading.current.store(
-            currents.median(),
-            Ordering::Relaxed,
-        );
-
-        device.reading.shunt_voltage.store(
-            shunt_voltages.median(),
-            Ordering::Relaxed,
-        );
-
-        device.reading.recoverable_errors.store(device.device.recoverable_errors as f32, Ordering::Relaxed);
     }
 }
 
@@ -193,7 +238,6 @@ where
     pub async fn new(i2c: I, addr: u8) -> Result<Self, Ina237Error<I>> {
         let mut dev = Self { addr, i2c, recoverable_errors: 0 };
 
-        info!("getting device id");
         // Check device ID with timeout
         let manuf_id = match embassy_time::with_timeout(
             embassy_time::Duration::from_millis(1000),
@@ -211,7 +255,6 @@ where
                 return Err(Ina237Error::InvalidDeviceId);
             }
         };
-        info!("manuf_id: {}", manuf_id);
         if manuf_id != 21577 {
             return Err(Ina237Error::InvalidDeviceId);
         }
@@ -401,25 +444,3 @@ where
     }
 }
 
-#[derive(Default)]
-pub struct Reading {
-    pub bus_voltage: f32,
-    pub shunt_voltage: f32,
-    pub current: f32,
-    pub power: f32,
-    pub die_temperature: f32,
-}
-
-#[derive(Default)]
-pub struct Output {
-    pub bus_voltage: AtomicF32,
-    pub shunt_voltage: AtomicF32,
-    pub current: AtomicF32,
-    pub zeros: AtomicF32,
-    pub recoverable_errors: AtomicF32,
-}
-
-pub struct ContinuousReading {
-    pub device: Ina237<I2cDevice<'static, CriticalSectionRawMutex, I2c0>>,
-    pub reading: &'static Output,
-}

@@ -1,7 +1,7 @@
 #![no_std]
 #![no_main]
 use embassy_rp::multicore::spawn_core1;
-use pico_climate::ina237::{Output as Ina237Output, INA237_DEFAULT_ADDR};
+use pico_climate::ina237::INA237_DEFAULT_ADDR;
 
 use cyw43::{JoinOptions, ScanOptions};
 use cyw43_pio::PioSpi;
@@ -19,12 +19,12 @@ use embassy_rp::{
 use embassy_time::{Duration, Timer};
 use panic_probe as _;
 use pico_climate::http::{web_task, AppState, LAST_REQUEST_TIME};
-use pico_climate::ina237::{continuous_reading, ContinuousReading, Ina237};
+use pico_climate::ina237::{continuous_reading, Ina237};
 use pico_climate::sht30::Sht30Device;
 use pico_climate::{adc_temp_sensor, sht30, Mutex, I2C_BUS_0};
 // use pico_climate::tcp_logger::tcp_logger_task;
 use embassy_embedded_hal::shared_bus::asynch::i2c::I2cDevice;
-use portable_atomic::AtomicF32;
+use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
 use static_cell::StaticCell;
 
 use core::fmt::Write;
@@ -40,8 +40,10 @@ bind_interrupts!(struct Irqs {
     I2C1_IRQ => i2c::InterruptHandler<I2C1>;
 });
 
-static INA237: StaticCell<ContinuousReading> = StaticCell::new();
-static SHT30: StaticCell<sht30::ContinuousReading> = StaticCell::new();
+static INA237: StaticCell<Ina237<I2cDevice<'static, CriticalSectionRawMutex, pico_climate::I2c0>>> = StaticCell::new();
+static SHT30: StaticCell<sht30::Sht30Device<I2cDevice<'static, CriticalSectionRawMutex, pico_climate::I2c0>>> = StaticCell::new();
+static SHT30_STATE: Mutex<sht30::SharedState> = Mutex::new(sht30::SharedState::new());
+static INA237_STATE: Mutex<pico_climate::ina237::SharedState> = Mutex::new(pico_climate::ina237::SharedState::new());
 
 defmt::timestamp!("{=u64:us}", embassy_time::Instant::now().as_micros());
 
@@ -83,25 +85,6 @@ async fn watchdog_feeder(mut watchdog: Watchdog) {
 }
 static mut CORE1_STACK: MulticoreStack<4096> = MulticoreStack::new();
 static EXECUTOR1: StaticCell<Executor> = StaticCell::new();
-static INA237_READING: Ina237Output = Ina237Output {
-    bus_voltage: AtomicF32::new(0.),
-    shunt_voltage: AtomicF32::new(0.),
-    current: AtomicF32::new(0.),
-    zeros: AtomicF32::new(0.),
-    recoverable_errors: AtomicF32::new(0.),
-};
-
-static SHT30_READING: sht30::Output = sht30::Output {
-    temperature: AtomicF32::new(0.),
-    humidity: AtomicF32::new(0.),
-    zeros: AtomicF32::new(0.),
-    recoverable_errors: AtomicF32::new(0.),
-    heater_status_count: AtomicF32::new(0.),
-    humidity_tracking_alert_count: AtomicF32::new(0.),
-    temperature_tracking_alert_count: AtomicF32::new(0.),
-    command_status_success_count: AtomicF32::new(0.),
-    write_data_checksum_status_count: AtomicF32::new(0.),
-};
 
 #[embassy_executor::main]
 async fn main(spawner: Spawner) {
@@ -133,11 +116,7 @@ async fn main(spawner: Spawner) {
         .await
         .ok();
 
-    let ina237 = if ina237_device.is_some() {
-        Some(&INA237_READING)
-    } else {
-        None
-    };
+    let has_ina237 = ina237_device.is_some();
 
     spawn_core1(
         p.CORE1,
@@ -145,17 +124,15 @@ async fn main(spawner: Spawner) {
         move || {
             let executor1 = EXECUTOR1.init(Executor::new());
             executor1.run(|spawner| {
-                spawner.must_spawn(sht30::continuous_reading(SHT30.init(
-                    sht30::ContinuousReading {
-                        device: sht30_device,
-                        reading: &SHT30_READING,
-                    },
-                )));
+                spawner.must_spawn(sht30::continuous_reading(
+                    SHT30.init(sht30_device),
+                    &SHT30_STATE,
+                ));
                 if let Some(device) = ina237_device {
-                    spawner.must_spawn(continuous_reading(INA237.init(ContinuousReading {
-                        device,
-                        reading: &INA237_READING,
-                    })))
+                    spawner.must_spawn(continuous_reading(
+                        INA237.init(device),
+                        &INA237_STATE,
+                    ));
                 }
             });
         },
@@ -221,14 +198,24 @@ async fn main(spawner: Spawner) {
 
     static APP_STATE: StaticCell<AppState> = StaticCell::new();
 
+    let ina237_state = if has_ina237 {
+        Some(&INA237_STATE)
+    } else {
+        None
+    };
+
     let app_state = APP_STATE.init(
-        AppState::new(temp_sensor, ina237, &SHT30_READING)
+        AppState::new(
+            temp_sensor,
+            ina237_state,
+            &SHT30_STATE,
+        )
             .await
             .unwrap(),
     );
 
     // spawner.must_spawn(tcp_logger_task(stack, "ryzen.lan", 9091));
-    for id in 0..8 {
+    for id in 0..4 {
         spawner.must_spawn(web_task(id, stack, app_state));
     }
 

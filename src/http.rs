@@ -1,5 +1,4 @@
 use core::ops::Deref;
-use core::sync::atomic::Ordering;
 
 use defmt::info;
 use embassy_net::Stack;
@@ -10,7 +9,7 @@ use picoserve::routing::get;
 
 use static_cell::StaticCell;
 
-use crate::ina237::{self, Output};
+use crate::ina237;
 use crate::prometheus::sample::Sample;
 use crate::prometheus::{
     counter, gauge, histogram, HistogramSamples, MetricWriter, MetricsRender, MetricsResponse,
@@ -69,6 +68,8 @@ impl MetricsRender for PicoClimateMetrics {
                 .await?;
         }
 
+        let sht30_output = app_state_lock.sht30_state.lock().await.snapshot();
+
         chunk_writer
             .write(gauge(
                 "sht30_reading",
@@ -77,11 +78,11 @@ impl MetricsRender for PicoClimateMetrics {
                 [
                     Sample::new(
                         ["temperature"],
-                        app_state_lock.sht30.temperature.load(Ordering::Relaxed),
+                        sht30_output.temperature,
                     ),
                     Sample::new(
                         ["humidity"],
-                        app_state_lock.sht30.humidity.load(Ordering::Relaxed),
+                        sht30_output.humidity,
                     ),
                 ]
                 .iter(),
@@ -94,41 +95,11 @@ impl MetricsRender for PicoClimateMetrics {
                 "Number of times SHT30 Status Registers have been true",
                 ["feature"],
                 [
-                    Sample::new(
-                        ["heater_status"],
-                        app_state_lock
-                            .sht30
-                            .heater_status_count
-                            .load(Ordering::Relaxed),
-                    ),
-                    Sample::new(
-                        ["humidity_tracking_alert"],
-                        app_state_lock
-                            .sht30
-                            .humidity_tracking_alert_count
-                            .load(Ordering::Relaxed),
-                    ),
-                    Sample::new(
-                        ["temperature_tracking_alert"],
-                        app_state_lock
-                            .sht30
-                            .temperature_tracking_alert_count
-                            .load(Ordering::Relaxed),
-                    ),
-                    Sample::new(
-                        ["command_status_success"],
-                        app_state_lock
-                            .sht30
-                            .command_status_success_count
-                            .load(Ordering::Relaxed),
-                    ),
-                    Sample::new(
-                        ["write_data_checksum_status"],
-                        app_state_lock
-                            .sht30
-                            .write_data_checksum_status_count
-                            .load(Ordering::Relaxed),
-                    ),
+                    Sample::new(["heater_status"], sht30_output.heater_status_count),
+                    Sample::new(["humidity_tracking_alert"], sht30_output.humidity_tracking_alert_count),
+                    Sample::new(["temperature_tracking_alert"], sht30_output.temperature_tracking_alert_count),
+                    Sample::new(["command_status_success"], sht30_output.command_status_success_count),
+                    Sample::new(["write_data_checksum_status"], sht30_output.write_data_checksum_status_count),
                 ]
                 .iter(),
             ))
@@ -139,11 +110,7 @@ impl MetricsRender for PicoClimateMetrics {
                 "sht30_zeros",
                 "Zero readings from SHT30 Sensor",
                 [],
-                [Sample::new(
-                    [],
-                    app_state_lock.sht30.zeros.load(Ordering::Relaxed),
-                )]
-                .iter(),
+                [Sample::new([], sht30_output.zeros)].iter(),
             ))
             .await?;
 
@@ -152,14 +119,7 @@ impl MetricsRender for PicoClimateMetrics {
                 "sht30_recoverable_errors",
                 "Recoverable erors from SHT30 Sensor",
                 [],
-                [Sample::new(
-                    [],
-                    app_state_lock
-                        .sht30
-                        .recoverable_errors
-                        .load(Ordering::Relaxed),
-                )]
-                .iter(),
+                [Sample::new([], sht30_output.recoverable_errors)].iter(),
             ))
             .await?;
 
@@ -172,19 +132,18 @@ impl MetricsRender for PicoClimateMetrics {
             ))
             .await?;
 
-        if let Some(ina237) = &mut app_state_lock.ina237 {
+        if let Some(ina237_state) = app_state_lock.ina237_state {
+            let ina237_output = ina237_state.lock().await.snapshot();
+
             chunk_writer
                 .write(gauge(
                     "ina237_reading",
                     "register values from INA237 Sensor",
                     ["register"],
                     [
-                        Sample::new(["bus_voltage"], ina237.bus_voltage.load(Ordering::Relaxed)),
-                        Sample::new(
-                            ["shunt_voltage"],
-                            ina237.shunt_voltage.load(Ordering::Relaxed),
-                        ),
-                        Sample::new(["current"], ina237.current.load(Ordering::Relaxed)),
+                        Sample::new(["bus_voltage"], ina237_output.bus_voltage),
+                        Sample::new(["shunt_voltage"], ina237_output.shunt_voltage),
+                        Sample::new(["current"], ina237_output.current),
                         Sample::new(["power"], 0.),
                         Sample::new(["die_temperature"], 0.),
                     ]
@@ -197,7 +156,7 @@ impl MetricsRender for PicoClimateMetrics {
                     "ina237_zeros",
                     "Zeroes reading from ina237",
                     [],
-                    [Sample::new([], ina237.zeros.load(Ordering::Relaxed) as f32)].iter(),
+                    [Sample::new([], ina237_output.zeros)].iter(),
                 ))
                 .await?;
 
@@ -206,11 +165,7 @@ impl MetricsRender for PicoClimateMetrics {
                     "ina237_recoverable_errors",
                     "Recoverable errors from ina237",
                     [],
-                    [Sample::new(
-                        [],
-                        ina237.recoverable_errors.load(Ordering::Relaxed) as f32,
-                    )]
-                    .iter(),
+                    [Sample::new([], ina237_output.recoverable_errors)].iter(),
                 ))
                 .await?;
 
@@ -251,8 +206,8 @@ pub struct AppState {
 impl AppState {
     pub async fn new(
         adc_temp_sensor: &'static mut adc_temp_sensor::Sensor<'static>,
-        ina237: Option<&'static Output>,
-        sht30: &'static sht30::Output,
+        ina237_state: Option<&'static Mutex<ina237::SharedState>>,
+        sht30_state: &'static Mutex<sht30::SharedState>,
     ) -> Result<Self, embassy_rp::i2c::Error> {
         let state = STATE.init(Mutex::new(State {
             count: [Sample::new([], 0.)],
@@ -260,8 +215,8 @@ impl AppState {
             sht30_errors: 0,
             ina237_errors: 0,
             // i2c: I2cDevice::new(&i2c_bus),
-            sht30,
-            ina237,
+            ina237_state,
+            sht30_state,
             wifi_signal: [
                 // RSSI
                 HistogramSamples::new(
@@ -959,32 +914,29 @@ pub struct State {
     pub ina237_errors: usize,
     // pub i2c: I,
     // pub sht30: Sht30Device<I>,
-    pub ina237: Option<&'static ina237::Output>,
-    pub sht30: &'static sht30::Output,
+    pub ina237_state: Option<&'static Mutex<ina237::SharedState>>,
+    pub sht30_state: &'static Mutex<sht30::SharedState>,
     pub wifi_signal: [HistogramSamples<'static, 3, 11>; 14 * 3],
 }
 
-#[embassy_executor::task(pool_size = 8)]
+#[embassy_executor::task(pool_size = 4)]
 pub async fn web_task(id: usize, stack: &'static Stack<'static>, app_state: &'static AppState) {
     let app = picoserve::Router::new()
         .route("/metrics", get(metrics))
         .with_state(app_state);
 
-    // if let Err(e) = app_state.state.lock().await.sht30.read().await {
-    //     error!("Got error reading i2c: {:?}", e);
-    // }
 
     loop {
         let config = picoserve::Config::new(picoserve::Timeouts {
             start_read_request: Some(Duration::from_secs(5)),
             persistent_start_read_request: Some(Duration::from_secs(1)),
             read_request: Some(Duration::from_secs(1)),
-            write: Some(Duration::from_secs(1)),
+            write: Some(Duration::from_secs(10)),
         });
 
-        let mut rx_buffer = [0; 1012];
-        let mut tx_buffer = [0; 1012];
-        let mut http_buffer = [0; 1012];
+        let mut rx_buffer = [0; 1024];
+        let mut tx_buffer = [0; 4096];
+        let mut http_buffer = [0; 1024];
         let _ = picoserve::Server::new(&app, &config, &mut http_buffer)
             .listen_and_serve(id, *stack, 80, &mut rx_buffer, &mut tx_buffer)
             .await;
