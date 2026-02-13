@@ -1,4 +1,4 @@
-use defmt::{error, Format};
+use defmt::error;
 use embassy_embedded_hal::shared_bus::asynch::i2c::I2cDevice;
 use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
 use embassy_time::{Duration, Timer};
@@ -6,14 +6,13 @@ use embedded_hal::i2c::ErrorType;
 
 use crate::{I2c0, Mutex, SampleSet};
 
-const I2C_TIMEOUT: Duration = Duration::from_millis(100);
+const TICK_TIMEOUT: Duration = Duration::from_millis(1000);
 
 /// Sensor output returned via channel (includes medians and counters)
 #[derive(Clone, Copy, Default)]
 pub struct Output {
     pub temperature: f32,
     pub humidity: f32,
-    pub reads: f32,
     pub successes: f32,
     pub timeouts: f32,
     pub zeros: f32,
@@ -28,7 +27,6 @@ pub struct Output {
 pub struct SharedState {
     temperatures: SampleSet<11>,
     humidities: SampleSet<11>,
-    reads: f32,
     successes: f32,
     timeouts: f32,
     zeros: f32,
@@ -45,7 +43,6 @@ impl SharedState {
         Self {
             temperatures: SampleSet::new(),
             humidities: SampleSet::new(),
-            reads: 0.,
             successes: 0.,
             timeouts: 0.,
             zeros: 0.,
@@ -59,7 +56,6 @@ impl SharedState {
     }
 
     pub fn record(&mut self, reading: &Reading) {
-        self.reads += 1.;
         self.successes += 1.;
         self.humidities.record(reading.humidity);
         self.temperatures.record(reading.temperature);
@@ -85,12 +81,10 @@ impl SharedState {
     }
 
     pub fn record_error(&mut self) {
-        self.reads += 1.;
         self.recoverable_errors += 1.;
     }
 
     pub fn record_timeout(&mut self) {
-        self.reads += 1.;
         self.timeouts += 1.;
     }
 
@@ -98,7 +92,6 @@ impl SharedState {
         Output {
             temperature: self.temperatures.median(),
             humidity: self.humidities.median(),
-            reads: self.reads,
             successes: self.successes,
             timeouts: self.timeouts,
             zeros: self.zeros,
@@ -131,50 +124,30 @@ pub struct Reading {
     pub write_data_checksum_status: bool,
 }
 
-#[derive(Format)]
-pub enum Sht30Error<E: Format> {
-    I2c(E),
-    Timeout,
-}
-
 pub struct Sht30Device<I> {
     addr: u8,
     i2c: I,
 }
 
-impl<I: embedded_hal_async::i2c::I2c> Sht30Device<I>
-where
-    <I as ErrorType>::Error: Format,
-{
+impl<I: embedded_hal_async::i2c::I2c> Sht30Device<I> {
     pub fn new(i2c: I, addr: u8) -> Self {
         Self { addr, i2c }
     }
-    /// Initialize the SHT30 sensor with a soft reset
-    pub async fn soft_reset(&mut self) -> Result<(), Sht30Error<<I as ErrorType>::Error>> {
-        embassy_time::with_timeout(I2C_TIMEOUT, self.i2c.write(self.addr, &SHT30_SOFT_RESET))
-            .await
-            .map_err(|_| Sht30Error::Timeout)?
-            .map_err(Sht30Error::I2c)
+
+    pub async fn soft_reset(&mut self) -> Result<(), <I as ErrorType>::Error> {
+        self.i2c.write(self.addr, &SHT30_SOFT_RESET).await
     }
 
     /// Read temperature, humidity, and status from the SHT30 sensor
-    pub async fn read(&mut self) -> Result<Reading, Sht30Error<<I as ErrorType>::Error>> {
+    pub async fn read(&mut self) -> Result<Reading, <I as ErrorType>::Error> {
         // Clear status register
-        embassy_time::with_timeout(I2C_TIMEOUT, self.i2c.write(self.addr, &SHT30_CLEAR_STATUS))
-            .await
-            .map_err(|_| Sht30Error::Timeout)?
-            .map_err(Sht30Error::I2c)?;
+        self.i2c.write(self.addr, &SHT30_CLEAR_STATUS).await?;
 
         let mut buffer = [0u8; 6];
         // Trigger measurement (high repeatability with clock stretching)
-        embassy_time::with_timeout(
-            I2C_TIMEOUT,
-            self.i2c
-                .write_read(self.addr, &SHT30_HIG_REP_CLOCK_STRETCH_READ, &mut buffer),
-        )
-        .await
-        .map_err(|_| Sht30Error::Timeout)?
-        .map_err(Sht30Error::I2c)?;
+        self.i2c
+            .write_read(self.addr, &SHT30_HIG_REP_CLOCK_STRETCH_READ, &mut buffer)
+            .await?;
 
         // Parse temperature data (first 3 bytes)
         let temp_raw = ((buffer[0] as u16) << 8) | (buffer[1] as u16);
@@ -190,14 +163,9 @@ where
 
         // Read status register
         let mut buffer = [0u8; 2];
-        embassy_time::with_timeout(
-            I2C_TIMEOUT,
-            self.i2c
-                .write_read(self.addr, &SHT30_READ_STATUS, &mut buffer),
-        )
-        .await
-        .map_err(|_| Sht30Error::Timeout)?
-        .map_err(Sht30Error::I2c)?;
+        self.i2c
+            .write_read(self.addr, &SHT30_READ_STATUS, &mut buffer)
+            .await?;
 
         let status: u16 = ((buffer[0] as u16) << 8) | (buffer[1] as u16);
 
@@ -220,32 +188,34 @@ where
     }
 }
 
+async fn run_tick(
+    device: &mut Sht30Device<I2cDevice<'static, CriticalSectionRawMutex, I2c0>>,
+    shared: &Mutex<SharedState>,
+) {
+    match device.read().await {
+        Ok(reading) => {
+            shared.lock().await.record(&reading);
+        }
+        Err(e) => {
+            error!("Error reading sht30: {}", e);
+            shared.lock().await.record_error();
+        }
+    }
+}
+
 #[embassy_executor::task]
 pub async fn continuous_reading(
     device: &'static mut Sht30Device<I2cDevice<'static, CriticalSectionRawMutex, I2c0>>,
     shared: &'static Mutex<SharedState>,
 ) {
-    if let Err(e) = device.soft_reset().await {
-        error!("Unable to reset sht30: {:?}", e);
-    }
+    let _ = device.soft_reset().await;
 
     loop {
-        match device.read().await {
-            Ok(reading) => {
-                shared.lock().await.record(&reading);
-            }
-            Err(Sht30Error::Timeout) => {
-                error!("Timeout reading sht30, attempting soft reset");
-                shared.lock().await.record_timeout();
-                if let Err(e) = device.soft_reset().await {
-                    error!("Unable to reset sht30 after timeout: {:?}", e);
-                }
-            }
-            Err(e) => {
-                error!("Error reading sht30: {:?}", e);
-                shared.lock().await.record_error();
-            }
+        if let Err(_) =  embassy_time::with_timeout(TICK_TIMEOUT, run_tick(device, shared)).await {
+            error!("Timeout reading sht30, attempting soft reset");
+            shared.lock().await.record_timeout();
+            let _ = device.soft_reset().await;            
         }
-        Timer::after_millis(100).await;
+        Timer::after(Duration::from_millis(500)).await;
     }
 }

@@ -8,7 +8,7 @@ use embassy_time::{Duration, Timer};
 
 use crate::{AverageSet, I2c0, Mutex, SampleSet};
 
-const I2C_TIMEOUT: Duration = Duration::from_millis(50);
+const TICK_TIMEOUT: Duration = Duration::from_millis(1000);
 
 // INA237 Register Addresses
 pub const INA237_REG_CONFIG: u8 = 0x00;
@@ -126,7 +126,6 @@ pub struct Output {
     pub bus_voltage: f32,
     pub shunt_voltage: f32,
     pub current: f32,
-    pub reads: f32,
     pub successes: f32,
     pub timeouts: f32,
     pub zeros: f32,
@@ -137,7 +136,6 @@ pub struct SharedState {
     bus_voltages: SampleSet<11>,
     shunt_voltages: SampleSet<11>,
     currents: AverageSet,
-    reads: f32,
     successes: f32,
     timeouts: f32,
     zeros: f32,
@@ -150,7 +148,6 @@ impl SharedState {
             bus_voltages: SampleSet::new(),
             shunt_voltages: SampleSet::new(),
             currents: AverageSet::new(),
-            reads: 0.,
             successes: 0.,
             timeouts: 0.,
             zeros: 0.,
@@ -179,12 +176,11 @@ impl SharedState {
         self.recoverable_errors = count as f32;
     }
 
-    pub fn record_read(&mut self) {
-        self.reads += 1.;
-    }
-
-    pub fn record_success(&mut self) {
+    pub fn record_success(&mut self, tick: &TickOutput) {
         self.successes += 1.;
+        self.record_bus_voltage(tick.bus_voltage);
+        self.record_current(tick.current);
+        self.record_shunt_voltage(tick.shunt_voltage);
     }
 
     pub fn record_timeout(&mut self) {
@@ -196,7 +192,6 @@ impl SharedState {
             bus_voltage: self.bus_voltages.median(),
             shunt_voltage: self.shunt_voltages.median(),
             current: self.currents.avg(),
-            reads: self.reads,
             successes: self.successes,
             timeouts: self.timeouts,
             zeros: self.zeros,
@@ -212,13 +207,36 @@ where
 {
     I2cError(<I as ErrorType>::Error),
     InvalidDeviceId,
-    Timeout,
+}
+
+pub struct TickOutput {
+    pub bus_voltage: f32,
+    pub current: f32,
+    pub shunt_voltage: f32,
 }
 
 pub struct Ina237<I> {
     addr: u8,
     i2c: I,
     recoverable_errors: usize,
+}
+
+async fn run_tick(
+    device: &mut Ina237<I2cDevice<'static, CriticalSectionRawMutex, I2c0>>,
+    shared: &Mutex<SharedState>,
+) {
+    match device.tick().await {
+        Ok(output) => {
+            let mut state = shared.lock().await;
+            state.record_success(&output);
+            state.set_recoverable_errors(device.recoverable_errors);
+        }
+        Err(e) => {
+            error!("Error reading ina237: {:?}", e);
+            let mut state = shared.lock().await;
+            state.set_recoverable_errors(device.recoverable_errors);
+        }
+    }
 }
 
 #[embassy_executor::task]
@@ -234,29 +252,10 @@ pub async fn continuous_reading(
     }
 
     loop {
-        shared.lock().await.record_read();
-
-        device.read_until_success().await;
-
-        let bus_v = device.read_bus_voltage().await;
-        let current = device.read_current().await;
-        let shunt_v = device.read_shunt_voltage().await;
-
-        {
-            let mut state = shared.lock().await;
-            if let Ok(v) = bus_v {
-                state.record_bus_voltage(v);
-            }
-            if let Ok(v) = current {
-                state.record_current(v);
-            }
-            if let Ok(v) = shunt_v {
-                state.record_shunt_voltage(v);
-            }
-            state.set_recoverable_errors(device.recoverable_errors);
-            state.record_success();
+        if let Err(_) = embassy_time::with_timeout(TICK_TIMEOUT, run_tick(device, shared)).await {
+            error!("Timeout reading ina237");
+            shared.lock().await.record_timeout();
         }
-
         Timer::after_millis(100).await;
     }
 }
@@ -317,20 +316,20 @@ where
         Ok(())
     }
 
-    pub async fn read_until_success(&mut self) {
-        loop {
-            match self.read().await {
-                Ok(_) => return,
-                Err(e) => {
-                    error!("Unable to read ina237: {:?}", e);
-                    Timer::after_millis(100).await;
-                }
-            }
-        }
+    /// Perform one full read cycle: trigger conversion, wait for ready, read all registers.
+    pub async fn tick(&mut self) -> Result<TickOutput, Ina237Error<I>> {
+        self.read().await?;
+        let bus_voltage = self.read_bus_voltage().await?;
+        let current = self.read_current().await?;
+        let shunt_voltage = self.read_shunt_voltage().await?;
+        Ok(TickOutput {
+            bus_voltage,
+            current,
+            shunt_voltage,
+        })
     }
 
-    // Keep original method for compatibility
-    pub async fn read(&mut self) -> Result<(), Ina237Error<I>> {
+    async fn read(&mut self) -> Result<(), Ina237Error<I>> {
         let config = INA237_MODE_TRIG_SHUNT_BUS
             | INA237_VBUSCT_4120US
             | INA237_VSHCT_4120US
@@ -338,22 +337,15 @@ where
             | INA237_AVG_1;
         self.write_register(INA237_REG_ADC_CONFIG, config).await?;
 
-        // Poll for conversion ready with timeout (3 channels × 4120us ≈ 12.4ms, use 50ms)
-        match embassy_time::with_timeout(I2C_TIMEOUT, async {
-            loop {
-                let diag_alrt = self.read_register(INA237_REG_DIAG_ALRT).await?;
+        loop {
+            let diag_alrt = self.read_register(INA237_REG_DIAG_ALRT).await?;
 
-                if diag_alrt & INA237_DIAG_CNVRF != 0 {
-                    return Ok::<(), Ina237Error<I>>(());
-                }
-                Timer::after_millis(1).await;
+            if diag_alrt & INA237_DIAG_CNVRF != 0 {
+                break;
             }
-        })
-        .await
-        {
-            Ok(result) => result,
-            Err(_) => Err(Ina237Error::Timeout),
+            Timer::after_millis(1).await;
         }
+        Ok(())
     }
 
     pub async fn read_bus_voltage(&mut self) -> Result<f32, Ina237Error<I>> {
@@ -398,24 +390,22 @@ where
 
         let mut attempts = 1;
         loop {
-            match embassy_time::with_timeout(
-                I2C_TIMEOUT,
-                self.i2c.write_read(self.addr, &[register], &mut buffer),
-            )
-            .await
+            match self
+                .i2c
+                .write_read(self.addr, &[register], &mut buffer)
+                .await
+                .map_err(Ina237Error::I2cError)
             {
-                Ok(Ok(_)) => break,
-                Ok(Err(e)) => {
+                Ok(_) => break,
+                Err(e) => {
                     if attempts == 3 {
-                        return Err(Ina237Error::I2cError(e));
+                        return Err(e);
                     }
+
                     attempts += 1;
                     Timer::after_millis(1).await;
                     self.recoverable_errors += 1;
                     error!("Error reading register {} {:?}", register, e);
-                }
-                Err(_) => {
-                    return Err(Ina237Error::Timeout);
                 }
             }
         }
@@ -429,24 +419,22 @@ where
 
         let mut attempts = 1;
         loop {
-            match embassy_time::with_timeout(
-                I2C_TIMEOUT,
-                self.i2c.write_read(self.addr, &[register], &mut buffer),
-            )
-            .await
+            match self
+                .i2c
+                .write_read(self.addr, &[register], &mut buffer)
+                .await
+                .map_err(Ina237Error::I2cError)
             {
-                Ok(Ok(_)) => break,
-                Ok(Err(e)) => {
+                Ok(_) => break,
+                Err(e) => {
                     if attempts == 3 {
-                        return Err(Ina237Error::I2cError(e));
+                        return Err(e);
                     }
+
                     attempts += 1;
                     self.recoverable_errors += 1;
                     Timer::after_millis(1).await;
                     error!("Error reading register {} {:?}", register, e);
-                }
-                Err(_) => {
-                    return Err(Ina237Error::Timeout);
                 }
             }
         }
@@ -460,19 +448,21 @@ where
 
         let mut attempts = 1;
         loop {
-            match embassy_time::with_timeout(I2C_TIMEOUT, self.i2c.write(self.addr, &data)).await {
-                Ok(Ok(_)) => break,
-                Ok(Err(e)) => {
+            match self
+                .i2c
+                .write(self.addr, &data)
+                .await
+                .map_err(Ina237Error::I2cError)
+            {
+                Ok(_) => break,
+                Err(e) => {
                     if attempts == 3 {
-                        return Err(Ina237Error::I2cError(e));
+                        return Err(e);
                     }
                     attempts += 1;
                     self.recoverable_errors += 1;
                     Timer::after_millis(1).await;
                     error!("Error writing register {} {:?}", register, e);
-                }
-                Err(_) => {
-                    return Err(Ina237Error::Timeout);
                 }
             }
         }

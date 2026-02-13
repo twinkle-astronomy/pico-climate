@@ -122,15 +122,6 @@ impl MetricsRender for PicoClimateMetrics {
 
         chunk_writer
             .write(counter(
-                "sht30_reads",
-                "Total read attempts from SHT30 Sensor",
-                [],
-                [Sample::new([], sht30_output.reads)].iter(),
-            ))
-            .await?;
-
-        chunk_writer
-            .write(counter(
                 "sht30_successes",
                 "Successful reads from SHT30 Sensor",
                 [],
@@ -181,15 +172,6 @@ impl MetricsRender for PicoClimateMetrics {
                         Sample::new(["die_temperature"], 0.),
                     ]
                     .iter(),
-                ))
-                .await?;
-
-            chunk_writer
-                .write(counter(
-                    "ina237_reads",
-                    "Total read attempts from ina237",
-                    [],
-                    [Sample::new([], ina237_output.reads)].iter(),
                 ))
                 .await?;
 
