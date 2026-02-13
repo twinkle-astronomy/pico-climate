@@ -23,7 +23,7 @@ pub static I2C_BUS_0: StaticCell<I2c0Bus> = StaticCell::new();
 
 pub struct AverageSet {
     sum: f32,
-    count: usize
+    count: usize,
 }
 
 impl AverageSet {
@@ -31,7 +31,6 @@ impl AverageSet {
         Self { sum: 0., count: 0 }
     }
 
-    
     pub fn record(&mut self, sample: f32) {
         self.sum += sample;
         self.count += 1;
@@ -39,9 +38,9 @@ impl AverageSet {
 
     pub fn avg(&mut self) -> f32 {
         if self.count == 0 {
-            return 0.0
+            return 0.0;
         }
-        
+
         let avg = self.sum / self.count as f32;
         self.count = 0;
         self.sum = 0.;
@@ -50,13 +49,16 @@ impl AverageSet {
 }
 
 pub struct SampleSet<const N: usize> {
-    samples: [f32;N],
+    samples: [f32; N],
     count: usize,
 }
 
 impl<const N: usize> SampleSet<N> {
     pub const fn new() -> Self {
-        Self { samples: [0.; N], count: 0 }
+        Self {
+            samples: [0.; N],
+            count: 0,
+        }
     }
 
     pub fn record(&mut self, sample: f32) {
@@ -67,14 +69,21 @@ impl<const N: usize> SampleSet<N> {
     pub fn median(&self) -> f32 {
         let sample_count = self.sample_count();
 
-        let mut samples = self.samples.iter().take(sample_count).collect::<Vec<&f32, N>>();
+        let mut samples = self
+            .samples
+            .iter()
+            .take(sample_count)
+            .collect::<Vec<&f32, N>>();
         samples.sort_unstable_by(|a, b| a.total_cmp(b));
-        
-        self.samples[samples.len() / 2]
+
+        *samples[samples.len() / 2]
     }
 
     fn sample_count(&self) -> usize {
-        if self.count > N { N } else { self.count }
+        if self.count > N {
+            N
+        } else {
+            self.count
+        }
     }
 }
-

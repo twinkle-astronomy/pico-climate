@@ -40,10 +40,14 @@ bind_interrupts!(struct Irqs {
     I2C1_IRQ => i2c::InterruptHandler<I2C1>;
 });
 
-static INA237: StaticCell<Ina237<I2cDevice<'static, CriticalSectionRawMutex, pico_climate::I2c0>>> = StaticCell::new();
-static SHT30: StaticCell<sht30::Sht30Device<I2cDevice<'static, CriticalSectionRawMutex, pico_climate::I2c0>>> = StaticCell::new();
+static INA237: StaticCell<Ina237<I2cDevice<'static, CriticalSectionRawMutex, pico_climate::I2c0>>> =
+    StaticCell::new();
+static SHT30: StaticCell<
+    sht30::Sht30Device<I2cDevice<'static, CriticalSectionRawMutex, pico_climate::I2c0>>,
+> = StaticCell::new();
 static SHT30_STATE: Mutex<sht30::SharedState> = Mutex::new(sht30::SharedState::new());
-static INA237_STATE: Mutex<pico_climate::ina237::SharedState> = Mutex::new(pico_climate::ina237::SharedState::new());
+static INA237_STATE: Mutex<pico_climate::ina237::SharedState> =
+    Mutex::new(pico_climate::ina237::SharedState::new());
 
 defmt::timestamp!("{=u64:us}", embassy_time::Instant::now().as_micros());
 
@@ -129,10 +133,7 @@ async fn main(spawner: Spawner) {
                     &SHT30_STATE,
                 ));
                 if let Some(device) = ina237_device {
-                    spawner.must_spawn(continuous_reading(
-                        INA237.init(device),
-                        &INA237_STATE,
-                    ));
+                    spawner.must_spawn(continuous_reading(INA237.init(device), &INA237_STATE));
                 }
             });
         },
@@ -205,11 +206,7 @@ async fn main(spawner: Spawner) {
     };
 
     let app_state = APP_STATE.init(
-        AppState::new(
-            temp_sensor,
-            ina237_state,
-            &SHT30_STATE,
-        )
+        AppState::new(temp_sensor, ina237_state, &SHT30_STATE)
             .await
             .unwrap(),
     );

@@ -4,9 +4,11 @@ use embedded_hal::i2c::ErrorType;
 
 use defmt::{error, info, Format};
 
-use embassy_time::Timer;
+use embassy_time::{Duration, Timer};
 
 use crate::{AverageSet, I2c0, Mutex, SampleSet};
+
+const I2C_TIMEOUT: Duration = Duration::from_millis(50);
 
 // INA237 Register Addresses
 pub const INA237_REG_CONFIG: u8 = 0x00;
@@ -124,6 +126,9 @@ pub struct Output {
     pub bus_voltage: f32,
     pub shunt_voltage: f32,
     pub current: f32,
+    pub reads: f32,
+    pub successes: f32,
+    pub timeouts: f32,
     pub zeros: f32,
     pub recoverable_errors: f32,
 }
@@ -132,6 +137,9 @@ pub struct SharedState {
     bus_voltages: SampleSet<11>,
     shunt_voltages: SampleSet<11>,
     currents: AverageSet,
+    reads: f32,
+    successes: f32,
+    timeouts: f32,
     zeros: f32,
     recoverable_errors: f32,
 }
@@ -142,6 +150,9 @@ impl SharedState {
             bus_voltages: SampleSet::new(),
             shunt_voltages: SampleSet::new(),
             currents: AverageSet::new(),
+            reads: 0.,
+            successes: 0.,
+            timeouts: 0.,
             zeros: 0.,
             recoverable_errors: 0.,
         }
@@ -168,11 +179,26 @@ impl SharedState {
         self.recoverable_errors = count as f32;
     }
 
+    pub fn record_read(&mut self) {
+        self.reads += 1.;
+    }
+
+    pub fn record_success(&mut self) {
+        self.successes += 1.;
+    }
+
+    pub fn record_timeout(&mut self) {
+        self.timeouts += 1.;
+    }
+
     pub fn snapshot(&mut self) -> Output {
         Output {
             bus_voltage: self.bus_voltages.median(),
             shunt_voltage: self.shunt_voltages.median(),
             current: self.currents.avg(),
+            reads: self.reads,
+            successes: self.successes,
+            timeouts: self.timeouts,
             zeros: self.zeros,
             recoverable_errors: self.recoverable_errors,
         }
@@ -186,6 +212,7 @@ where
 {
     I2cError(<I as ErrorType>::Error),
     InvalidDeviceId,
+    Timeout,
 }
 
 pub struct Ina237<I> {
@@ -207,6 +234,8 @@ pub async fn continuous_reading(
     }
 
     loop {
+        shared.lock().await.record_read();
+
         device.read_until_success().await;
 
         let bus_v = device.read_bus_voltage().await;
@@ -225,6 +254,7 @@ pub async fn continuous_reading(
                 state.record_shunt_voltage(v);
             }
             state.set_recoverable_errors(device.recoverable_errors);
+            state.record_success();
         }
 
         Timer::after_millis(100).await;
@@ -236,7 +266,11 @@ where
     <I as embedded_hal::i2c::ErrorType>::Error: Format,
 {
     pub async fn new(i2c: I, addr: u8) -> Result<Self, Ina237Error<I>> {
-        let mut dev = Self { addr, i2c, recoverable_errors: 0 };
+        let mut dev = Self {
+            addr,
+            i2c,
+            recoverable_errors: 0,
+        };
 
         // Check device ID with timeout
         let manuf_id = match embassy_time::with_timeout(
@@ -304,26 +338,32 @@ where
             | INA237_AVG_1;
         self.write_register(INA237_REG_ADC_CONFIG, config).await?;
 
-        loop {
-            let diag_alrt = self.read_register(INA237_REG_DIAG_ALRT).await?;
+        // Poll for conversion ready with timeout (3 channels × 4120us ≈ 12.4ms, use 50ms)
+        match embassy_time::with_timeout(I2C_TIMEOUT, async {
+            loop {
+                let diag_alrt = self.read_register(INA237_REG_DIAG_ALRT).await?;
 
-            if diag_alrt & INA237_DIAG_CNVRF != 0 {
-                break;
+                if diag_alrt & INA237_DIAG_CNVRF != 0 {
+                    return Ok::<(), Ina237Error<I>>(());
+                }
+                Timer::after_millis(1).await;
             }
+        })
+        .await
+        {
+            Ok(result) => result,
+            Err(_) => Err(Ina237Error::Timeout),
         }
-        Ok(())
     }
 
     pub async fn read_bus_voltage(&mut self) -> Result<f32, Ina237Error<I>> {
         let raw_voltage = self.read_register_i16(INA237_REG_BUS_VOLTAGE).await?;
-        // info!("raw_voltage: {}", raw_voltage);
         // Bus voltage LSB = 3.125 mV (with ADC range bit set)
         let voltage = (raw_voltage as f32) * 3.125 / 1000.0;
         Ok(voltage)
     }
 
     pub async fn read_die_temperature(&mut self) -> Result<f32, Ina237Error<I>> {
-        // info!("read_die_temperature()");
         let raw_temp = self.read_register_i16(INA237_REG_DIE_TEMP).await?;
 
         let raw_temp = raw_temp >> 4;
@@ -333,17 +373,13 @@ where
     }
 
     pub async fn read_shunt_voltage(&mut self) -> Result<f32, Ina237Error<I>> {
-        // info!("read_shunt_voltage()");
         let raw_voltage = self.read_register(INA237_REG_SHUNT_VOLTAGE).await? as i16;
-
-        // info!("raw_shunt_voltage: {}", raw_voltage);
 
         // Return raw value as float
         Ok(raw_voltage as f32)
     }
 
     pub async fn read_current(&mut self) -> Result<f32, Ina237Error<I>> {
-        // info!("read_current()");
         let raw_current = self.read_register(INA237_REG_CURRENT).await? as i16;
         // Current = raw_value × current_lsb
         let current = (raw_current as f32) * CURRENT_LSB;
@@ -351,7 +387,6 @@ where
     }
 
     pub async fn read_power(&mut self) -> Result<f32, Ina237Error<I>> {
-        // info!("read_power()");
         let raw_power = self.read_register(INA237_REG_POWER).await?;
         // Power = raw_value × power_lsb
         let power = (raw_power as f32) * POWER_LSB;
@@ -363,22 +398,24 @@ where
 
         let mut attempts = 1;
         loop {
-            match self
-                .i2c
-                .write_read(self.addr, &[register], &mut buffer)
-                .await
-                .map_err(Ina237Error::I2cError)
+            match embassy_time::with_timeout(
+                I2C_TIMEOUT,
+                self.i2c.write_read(self.addr, &[register], &mut buffer),
+            )
+            .await
             {
-                Ok(_) => break,
-                Err(e) => {
+                Ok(Ok(_)) => break,
+                Ok(Err(e)) => {
                     if attempts == 3 {
-                        return Err(e);
+                        return Err(Ina237Error::I2cError(e));
                     }
-
                     attempts += 1;
                     Timer::after_millis(1).await;
                     self.recoverable_errors += 1;
                     error!("Error reading register {} {:?}", register, e);
+                }
+                Err(_) => {
+                    return Err(Ina237Error::Timeout);
                 }
             }
         }
@@ -392,22 +429,24 @@ where
 
         let mut attempts = 1;
         loop {
-            match self
-                .i2c
-                .write_read(self.addr, &[register], &mut buffer)
-                .await
-                .map_err(Ina237Error::I2cError)
+            match embassy_time::with_timeout(
+                I2C_TIMEOUT,
+                self.i2c.write_read(self.addr, &[register], &mut buffer),
+            )
+            .await
             {
-                Ok(_) => break,
-                Err(e) => {
+                Ok(Ok(_)) => break,
+                Ok(Err(e)) => {
                     if attempts == 3 {
-                        return Err(e);
+                        return Err(Ina237Error::I2cError(e));
                     }
-
                     attempts += 1;
                     self.recoverable_errors += 1;
                     Timer::after_millis(1).await;
                     error!("Error reading register {} {:?}", register, e);
+                }
+                Err(_) => {
+                    return Err(Ina237Error::Timeout);
                 }
             }
         }
@@ -421,21 +460,19 @@ where
 
         let mut attempts = 1;
         loop {
-            match self
-                .i2c
-                .write(self.addr, &data)
-                .await
-                .map_err(Ina237Error::I2cError)
-            {
-                Ok(_) => break,
-                Err(e) => {
+            match embassy_time::with_timeout(I2C_TIMEOUT, self.i2c.write(self.addr, &data)).await {
+                Ok(Ok(_)) => break,
+                Ok(Err(e)) => {
                     if attempts == 3 {
-                        return Err(e);
+                        return Err(Ina237Error::I2cError(e));
                     }
                     attempts += 1;
                     self.recoverable_errors += 1;
                     Timer::after_millis(1).await;
                     error!("Error writing register {} {:?}", register, e);
+                }
+                Err(_) => {
+                    return Err(Ina237Error::Timeout);
                 }
             }
         }
@@ -443,4 +480,3 @@ where
         Ok(())
     }
 }
-

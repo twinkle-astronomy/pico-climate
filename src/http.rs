@@ -14,8 +14,8 @@ use crate::prometheus::sample::Sample;
 use crate::prometheus::{
     counter, gauge, histogram, HistogramSamples, MetricWriter, MetricsRender, MetricsResponse,
 };
-use crate::{adc_temp_sensor, Mutex};
 use crate::sht30;
+use crate::{adc_temp_sensor, Mutex};
 
 pub static LAST_REQUEST_TIME: Mutex<Instant> = Mutex::new(Instant::MIN);
 
@@ -76,14 +76,8 @@ impl MetricsRender for PicoClimateMetrics {
                 "Reading from SHT30 Sensor",
                 ["sensor"],
                 [
-                    Sample::new(
-                        ["temperature"],
-                        sht30_output.temperature,
-                    ),
-                    Sample::new(
-                        ["humidity"],
-                        sht30_output.humidity,
-                    ),
+                    Sample::new(["temperature"], sht30_output.temperature),
+                    Sample::new(["humidity"], sht30_output.humidity),
                 ]
                 .iter(),
             ))
@@ -96,10 +90,22 @@ impl MetricsRender for PicoClimateMetrics {
                 ["feature"],
                 [
                     Sample::new(["heater_status"], sht30_output.heater_status_count),
-                    Sample::new(["humidity_tracking_alert"], sht30_output.humidity_tracking_alert_count),
-                    Sample::new(["temperature_tracking_alert"], sht30_output.temperature_tracking_alert_count),
-                    Sample::new(["command_status_success"], sht30_output.command_status_success_count),
-                    Sample::new(["write_data_checksum_status"], sht30_output.write_data_checksum_status_count),
+                    Sample::new(
+                        ["humidity_tracking_alert"],
+                        sht30_output.humidity_tracking_alert_count,
+                    ),
+                    Sample::new(
+                        ["temperature_tracking_alert"],
+                        sht30_output.temperature_tracking_alert_count,
+                    ),
+                    Sample::new(
+                        ["command_status_success"],
+                        sht30_output.command_status_success_count,
+                    ),
+                    Sample::new(
+                        ["write_data_checksum_status"],
+                        sht30_output.write_data_checksum_status_count,
+                    ),
                 ]
                 .iter(),
             ))
@@ -111,6 +117,33 @@ impl MetricsRender for PicoClimateMetrics {
                 "Zero readings from SHT30 Sensor",
                 [],
                 [Sample::new([], sht30_output.zeros)].iter(),
+            ))
+            .await?;
+
+        chunk_writer
+            .write(counter(
+                "sht30_reads",
+                "Total read attempts from SHT30 Sensor",
+                [],
+                [Sample::new([], sht30_output.reads)].iter(),
+            ))
+            .await?;
+
+        chunk_writer
+            .write(counter(
+                "sht30_successes",
+                "Successful reads from SHT30 Sensor",
+                [],
+                [Sample::new([], sht30_output.successes)].iter(),
+            ))
+            .await?;
+
+        chunk_writer
+            .write(counter(
+                "sht30_timeouts",
+                "Timeout events reading SHT30 Sensor",
+                [],
+                [Sample::new([], sht30_output.timeouts)].iter(),
             ))
             .await?;
 
@@ -148,6 +181,33 @@ impl MetricsRender for PicoClimateMetrics {
                         Sample::new(["die_temperature"], 0.),
                     ]
                     .iter(),
+                ))
+                .await?;
+
+            chunk_writer
+                .write(counter(
+                    "ina237_reads",
+                    "Total read attempts from ina237",
+                    [],
+                    [Sample::new([], ina237_output.reads)].iter(),
+                ))
+                .await?;
+
+            chunk_writer
+                .write(counter(
+                    "ina237_successes",
+                    "Successful reads from ina237",
+                    [],
+                    [Sample::new([], ina237_output.successes)].iter(),
+                ))
+                .await?;
+
+            chunk_writer
+                .write(counter(
+                    "ina237_timeouts",
+                    "Timeout events reading ina237",
+                    [],
+                    [Sample::new([], ina237_output.timeouts)].iter(),
                 ))
                 .await?;
 
@@ -195,8 +255,7 @@ async fn metrics(
     ChunkedResponse::new(MetricsResponse::new(PicoClimateMetrics { app_state }))
 }
 
-static STATE: StaticCell<Mutex<State>> =
-    StaticCell::new();
+static STATE: StaticCell<Mutex<State>> = StaticCell::new();
 
 #[derive(Clone, Copy)]
 pub struct AppState {
@@ -924,7 +983,6 @@ pub async fn web_task(id: usize, stack: &'static Stack<'static>, app_state: &'st
     let app = picoserve::Router::new()
         .route("/metrics", get(metrics))
         .with_state(app_state);
-
 
     loop {
         let config = picoserve::Config::new(picoserve::Timeouts {
