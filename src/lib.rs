@@ -68,6 +68,9 @@ impl<const N: usize> SampleSet<N> {
 
     pub fn median(&self) -> f32 {
         let sample_count = self.sample_count();
+        if sample_count == 0 {
+            return 0.;
+        }
 
         let mut samples = self
             .samples

@@ -1,4 +1,4 @@
-use defmt::error;
+use defmt::{error, info};
 use embassy_embedded_hal::shared_bus::asynch::i2c::I2cDevice;
 use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
 use embassy_time::{Duration, Timer};
@@ -201,12 +201,19 @@ pub async fn continuous_reading(
     device: &'static mut Sht30Device<I2cDevice<'static, CriticalSectionRawMutex, I2c0>>,
     shared: &'static Mutex<SharedState>,
 ) {
+    // return;
+    info!("sht30 continuous_reading");
     loop {
-        let _ = device.soft_reset().await;
+        // info!("sht30: reset");
+        // if let Err(e) = embassy_time::with_timeout(TICK_TIMEOUT, device.soft_reset()).await {
+        //     error!("Timeout resetting sht30: {:?}", e);
+        // }
 
-        Timer::after(Duration::from_secs(5)).await;
+        // Timer::after(Duration::from_secs(5)).await;
     
         loop {
+            info!("sht30: reading");
+            Timer::after(Duration::from_millis(100)).await;
             let result = embassy_time::with_timeout(TICK_TIMEOUT, device.read()).await;
 
             let mut state = match embassy_time::with_timeout(TICK_TIMEOUT, shared.lock()).await {
@@ -234,7 +241,7 @@ pub async fn continuous_reading(
                     break;
                 }
             }
-            Timer::after(Duration::from_millis(500)).await;
+            // Timer::after(Duration::from_millis(500)).await;
         }
     }
 }

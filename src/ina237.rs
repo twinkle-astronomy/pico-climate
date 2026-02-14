@@ -161,8 +161,8 @@ impl SharedState {
     }
 
     pub fn record_bus_voltage(&mut self, v: f32) {
-        if v < 10. {
-            error!("Voltage read is less than 10v: {}", v);
+        if v < 3. {
+            error!("Voltage read is less than 3v: {}", v);
             self.zeros += 1.;
         } else {
             self.bus_voltages.record(v);
