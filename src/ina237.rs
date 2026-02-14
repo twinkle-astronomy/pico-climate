@@ -1,10 +1,12 @@
+use core::ops::Sub;
+
 use embassy_embedded_hal::shared_bus::asynch::i2c::I2cDevice;
 use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
 use embedded_hal::i2c::ErrorType;
 
 use defmt::{error, info, Format};
 
-use embassy_time::{Duration, Timer};
+use embassy_time::{Duration, Instant, Timer};
 
 use crate::{AverageSet, I2c0, Mutex, SampleSet};
 
@@ -227,6 +229,8 @@ pub struct Ina237<I> {
     addr: u8,
     i2c: I,
     recoverable_errors: usize,
+    last_reading: Instant,
+    time_between_reading: Duration,
 }
 
 #[embassy_executor::task]
@@ -288,6 +292,8 @@ where
             addr,
             i2c,
             recoverable_errors: 0,
+            last_reading: Instant::now(),
+            time_between_reading: Duration::from_millis(500),
         };
 
         // Check device ID with timeout
@@ -324,9 +330,7 @@ where
     }
 
     pub async fn init(&mut self) -> Result<(), Ina237Error<I>> {
-        // let config = INA237_DIAG_ALATCH | INA237_DIAG_CNVR;
-        // self.write_register(INA237_REG_DIAG_ALRT, config).await?;
-
+        self.last_reading = Instant::now();
 
         let config = INA237_MODE_CONT_SHUNT_BUS
             | INA237_VBUSCT_4120US
@@ -369,6 +373,10 @@ where
     }
 
     pub async fn wait_for_value(&mut self) -> Result<(), Ina237Error<I>> {
+        let start = Instant::now();
+        let expected_reading_at = self.last_reading.saturating_add(self.time_between_reading);
+        let expected_wait_time = expected_reading_at.saturating_duration_since(start);
+        Timer::after(expected_wait_time).await;
         loop {
             let diag_alrt = self.read_register(INA237_REG_DIAG_ALRT).await?;
 
@@ -377,6 +385,8 @@ where
             }
             Timer::after_millis(1).await;
         }
+        self.last_reading = Instant::now();
+        self.time_between_reading = start.elapsed().sub(Duration::from_millis(1));
         Ok(())
     }
 
