@@ -149,6 +149,15 @@ impl MetricsRender for PicoClimateMetrics {
 
         chunk_writer
             .write(counter(
+                "sht30_resets",
+                "Resets of the SHT30 Sensor",
+                [],
+                [Sample::new([], sht30_output.resets)].iter(),
+            ))
+            .await?;
+
+        chunk_writer
+            .write(counter(
                 "sht30_error",
                 "Errors reading from SHT30 Sensor",
                 [],
@@ -216,7 +225,16 @@ impl MetricsRender for PicoClimateMetrics {
                     "ina237_errors",
                     "Errors reading from ina237",
                     [],
-                    [Sample::new([], app_state_lock.ina237_errors as f32)].iter(),
+                    [Sample::new([], ina237_output.resets as f32)].iter(),
+                ))
+                .await?;
+
+            chunk_writer
+                .write(counter(
+                    "ina237_resets",
+                    "Resets of the ina237",
+                    [],
+                    [Sample::new([], ina237_output.resets as f32)].iter(),
                 ))
                 .await?;
         }

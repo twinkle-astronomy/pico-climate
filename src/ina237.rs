@@ -130,6 +130,7 @@ pub struct Output {
     pub timeouts: f32,
     pub zeros: f32,
     pub recoverable_errors: f32,
+    pub resets: f32,
 }
 
 pub struct SharedState {
@@ -140,6 +141,7 @@ pub struct SharedState {
     timeouts: f32,
     zeros: f32,
     recoverable_errors: f32,
+    resets: f32,
 }
 
 impl SharedState {
@@ -152,6 +154,7 @@ impl SharedState {
             timeouts: 0.,
             zeros: 0.,
             recoverable_errors: 0.,
+            resets: 0.,
         }
     }
 
@@ -187,6 +190,10 @@ impl SharedState {
         self.timeouts += 1.;
     }
 
+    pub fn record_reset(&mut self) {
+        self.resets += 1.;
+    }
+
     pub fn snapshot(&mut self) -> Output {
         Output {
             bus_voltage: self.bus_voltages.median(),
@@ -196,6 +203,7 @@ impl SharedState {
             timeouts: self.timeouts,
             zeros: self.zeros,
             recoverable_errors: self.recoverable_errors,
+            resets: self.resets,
         }
     }
 }
@@ -221,42 +229,53 @@ pub struct Ina237<I> {
     recoverable_errors: usize,
 }
 
-async fn run_tick(
-    device: &mut Ina237<I2cDevice<'static, CriticalSectionRawMutex, I2c0>>,
-    shared: &Mutex<SharedState>,
-) {
-    match device.tick().await {
-        Ok(output) => {
-            let mut state = shared.lock().await;
-            state.record_success(&output);
-            state.set_recoverable_errors(device.recoverable_errors);
-        }
-        Err(e) => {
-            error!("Error reading ina237: {:?}", e);
-            let mut state = shared.lock().await;
-            state.set_recoverable_errors(device.recoverable_errors);
-        }
-    }
-}
-
 #[embassy_executor::task]
 pub async fn continuous_reading(
     device: &'static mut Ina237<I2cDevice<'static, CriticalSectionRawMutex, I2c0>>,
     shared: &'static Mutex<SharedState>,
 ) {
-    if let Err(e) = device.reset().await {
-        error!("Unable to reset ina237: {:?}", e);
-    }
-    if let Err(e) = device.init().await {
-        error!("Unable to init ina237: {:?}", e);
-    }
-
     loop {
-        if let Err(_) = embassy_time::with_timeout(TICK_TIMEOUT, run_tick(device, shared)).await {
-            error!("Timeout reading ina237");
-            shared.lock().await.record_timeout();
+        if let Err(e) = device.reset().await {
+            error!("Unable to reset ina237: {:?}", e);
         }
-        Timer::after_millis(100).await;
+        if let Err(e) = device.init().await {
+            error!("Unable to init ina237: {:?}", e);
+        }
+
+        Timer::after_secs(5).await;
+
+        loop {
+            let result = embassy_time::with_timeout(TICK_TIMEOUT, device.tick()).await;
+
+            let mut state = match embassy_time::with_timeout(TICK_TIMEOUT, shared.lock()).await {
+                Ok(v) => v,
+                Err(_) => {
+                    error!("Timeout getting state lock");
+                    break;
+                }
+            };
+
+            match result {
+                Ok(Ok(output)) => {
+                    state.record_success(&output);
+                    state.set_recoverable_errors(device.recoverable_errors);
+                }
+                Ok(Err(e)) => {
+                    error!("Error reading ina237: {:?}", e);
+                    state.set_recoverable_errors(device.recoverable_errors);
+                    state.record_reset();
+                    break;
+                }
+                Err(_) => {
+                    state.set_recoverable_errors(device.recoverable_errors);
+                    state.record_timeout();
+                    state.record_reset();
+                    break;
+                }
+            }
+            // Timer::after_millis(100).await;
+        }
+
     }
 }
 
@@ -305,8 +324,16 @@ where
     }
 
     pub async fn init(&mut self) -> Result<(), Ina237Error<I>> {
-        let config = INA237_DIAG_ALATCH | INA237_DIAG_CNVR;
-        self.write_register(INA237_REG_DIAG_ALRT, config).await?;
+        // let config = INA237_DIAG_ALATCH | INA237_DIAG_CNVR;
+        // self.write_register(INA237_REG_DIAG_ALRT, config).await?;
+
+
+        let config = INA237_MODE_CONT_SHUNT_BUS
+            | INA237_VBUSCT_4120US
+            | INA237_VSHCT_4120US
+            | INA237_VTCT_4120US
+            | INA237_AVG_64;
+        self.write_register(INA237_REG_ADC_CONFIG, config).await?;
 
         let calib = (819.2e6 * CURRENT_LSB * 0.015) as u16;
         info!("calib: {}", calib);
@@ -318,7 +345,9 @@ where
 
     /// Perform one full read cycle: trigger conversion, wait for ready, read all registers.
     pub async fn tick(&mut self) -> Result<TickOutput, Ina237Error<I>> {
-        self.read().await?;
+        // self.trigger().await?;
+
+        self.wait_for_value().await?;
         let bus_voltage = self.read_bus_voltage().await?;
         let current = self.read_current().await?;
         let shunt_voltage = self.read_shunt_voltage().await?;
@@ -329,14 +358,17 @@ where
         })
     }
 
-    async fn read(&mut self) -> Result<(), Ina237Error<I>> {
+    pub async fn trigger(&mut self) -> Result<(), Ina237Error<I>> {
         let config = INA237_MODE_TRIG_SHUNT_BUS
             | INA237_VBUSCT_4120US
             | INA237_VSHCT_4120US
             | INA237_VTCT_4120US
             | INA237_AVG_1;
         self.write_register(INA237_REG_ADC_CONFIG, config).await?;
+        Ok(())
+    }
 
+    pub async fn wait_for_value(&mut self) -> Result<(), Ina237Error<I>> {
         loop {
             let diag_alrt = self.read_register(INA237_REG_DIAG_ALRT).await?;
 

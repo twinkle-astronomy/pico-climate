@@ -17,6 +17,7 @@ pub struct Output {
     pub timeouts: f32,
     pub zeros: f32,
     pub recoverable_errors: f32,
+    pub resets: f32,
     pub heater_status_count: f32,
     pub humidity_tracking_alert_count: f32,
     pub temperature_tracking_alert_count: f32,
@@ -31,6 +32,7 @@ pub struct SharedState {
     timeouts: f32,
     zeros: f32,
     recoverable_errors: f32,
+    resets: f32,
     heater_status_count: f32,
     humidity_tracking_alert_count: f32,
     temperature_tracking_alert_count: f32,
@@ -47,6 +49,7 @@ impl SharedState {
             timeouts: 0.,
             zeros: 0.,
             recoverable_errors: 0.,
+            resets: 0.,
             heater_status_count: 0.,
             humidity_tracking_alert_count: 0.,
             temperature_tracking_alert_count: 0.,
@@ -88,6 +91,10 @@ impl SharedState {
         self.timeouts += 1.;
     }
 
+    pub fn record_reset(&mut self) {
+        self.resets += 1.;
+    }
+
     pub fn snapshot(&self) -> Output {
         Output {
             temperature: self.temperatures.median(),
@@ -96,6 +103,7 @@ impl SharedState {
             timeouts: self.timeouts,
             zeros: self.zeros,
             recoverable_errors: self.recoverable_errors,
+            resets: self.resets,
             heater_status_count: self.heater_status_count,
             humidity_tracking_alert_count: self.humidity_tracking_alert_count,
             temperature_tracking_alert_count: self.temperature_tracking_alert_count,
@@ -188,34 +196,45 @@ impl<I: embedded_hal_async::i2c::I2c> Sht30Device<I> {
     }
 }
 
-async fn run_tick(
-    device: &mut Sht30Device<I2cDevice<'static, CriticalSectionRawMutex, I2c0>>,
-    shared: &Mutex<SharedState>,
-) {
-    match device.read().await {
-        Ok(reading) => {
-            shared.lock().await.record(&reading);
-        }
-        Err(e) => {
-            error!("Error reading sht30: {}", e);
-            shared.lock().await.record_error();
-        }
-    }
-}
-
 #[embassy_executor::task]
 pub async fn continuous_reading(
     device: &'static mut Sht30Device<I2cDevice<'static, CriticalSectionRawMutex, I2c0>>,
     shared: &'static Mutex<SharedState>,
 ) {
-    let _ = device.soft_reset().await;
-
     loop {
-        if let Err(_) =  embassy_time::with_timeout(TICK_TIMEOUT, run_tick(device, shared)).await {
-            error!("Timeout reading sht30, attempting soft reset");
-            shared.lock().await.record_timeout();
-            let _ = device.soft_reset().await;            
+        let _ = device.soft_reset().await;
+
+        Timer::after(Duration::from_secs(5)).await;
+    
+        loop {
+            let result = embassy_time::with_timeout(TICK_TIMEOUT, device.read()).await;
+
+            let mut state = match embassy_time::with_timeout(TICK_TIMEOUT, shared.lock()).await {
+                Ok(v) => v,
+                Err(_) => {
+                    error!("Timeout getting state lock");
+                    break;
+                }
+            };
+
+            match result {
+                Ok(Ok(reading)) => {
+                    state.record(&reading);
+                }
+                Ok(Err(e)) => {
+                    error!("Error reading sht30: {}", e);
+                    state.record_error();
+                    state.record_reset();
+                    break;
+                }
+                Err(_) => {
+                    error!("Timeout reading sht30, attempting soft reset");
+                    state.record_timeout();
+                    state.record_reset();
+                    break;
+                }
+            }
+            Timer::after(Duration::from_millis(500)).await;
         }
-        Timer::after(Duration::from_millis(500)).await;
     }
 }
