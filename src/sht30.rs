@@ -116,11 +116,14 @@ impl SharedState {
 // SHT30 I2C Address
 pub const SHT30_ADDR: u8 = 0x44;
 
-// SHT30 Commands
-const SHT30_HIG_REP_CLOCK_STRETCH_READ: [u8; 2] = [0x2C, 0x06];
+// SHT30 Commands (no clock stretching)
+const SHT30_HIG_REP_NO_STRETCH: [u8; 2] = [0x24, 0x00];
 const SHT30_READ_STATUS: [u8; 2] = [0xF3, 0x2D];
 const SHT30_CLEAR_STATUS: [u8; 2] = [0x30, 0x41];
 const SHT30_SOFT_RESET: [u8; 2] = [0x30, 0xA2];
+
+// Max measurement duration for high repeatability (per datasheet: 15.5ms)
+const MEASUREMENT_DELAY: Duration = Duration::from_millis(20);
 
 pub struct Reading {
     pub temperature: f32,
@@ -150,12 +153,17 @@ impl<I: embedded_hal_async::i2c::I2c> Sht30Device<I> {
     pub async fn read(&mut self) -> Result<Reading, <I as ErrorType>::Error> {
         // Clear status register
         self.i2c.write(self.addr, &SHT30_CLEAR_STATUS).await?;
+        Timer::after_millis(1).await;
 
+        // Trigger measurement (high repeatability, no clock stretching)
+        self.i2c.write(self.addr, &SHT30_HIG_REP_NO_STRETCH).await?;
+
+        // Wait for measurement to complete
+        Timer::after(MEASUREMENT_DELAY).await;
+
+        // Read 6 bytes of measurement data
         let mut buffer = [0u8; 6];
-        // Trigger measurement (high repeatability with clock stretching)
-        self.i2c
-            .write_read(self.addr, &SHT30_HIG_REP_CLOCK_STRETCH_READ, &mut buffer)
-            .await?;
+        self.i2c.read(self.addr, &mut buffer).await?;
 
         // Parse temperature data (first 3 bytes)
         let temp_raw = ((buffer[0] as u16) << 8) | (buffer[1] as u16);
@@ -174,6 +182,7 @@ impl<I: embedded_hal_async::i2c::I2c> Sht30Device<I> {
         self.i2c
             .write_read(self.addr, &SHT30_READ_STATUS, &mut buffer)
             .await?;
+        Timer::after_millis(1).await;
 
         let status: u16 = ((buffer[0] as u16) << 8) | (buffer[1] as u16);
 
@@ -204,15 +213,15 @@ pub async fn continuous_reading(
     // return;
     info!("sht30 continuous_reading");
     loop {
-        // info!("sht30: reset");
-        // if let Err(e) = embassy_time::with_timeout(TICK_TIMEOUT, device.soft_reset()).await {
-        //     error!("Timeout resetting sht30: {:?}", e);
-        // }
+        info!("sht30: reset");
+        if let Err(e) = embassy_time::with_timeout(TICK_TIMEOUT, device.soft_reset()).await {
+            error!("Timeout resetting sht30: {:?}", e);
+        }
 
-        // Timer::after(Duration::from_secs(5)).await;
-    
+        Timer::after(Duration::from_secs(5)).await;
+
         loop {
-            info!("sht30: reading");
+            // info!("sht30: reading");
             Timer::after(Duration::from_millis(100)).await;
             let result = embassy_time::with_timeout(TICK_TIMEOUT, device.read()).await;
 

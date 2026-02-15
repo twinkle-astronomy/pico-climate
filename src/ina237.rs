@@ -279,7 +279,6 @@ pub async fn continuous_reading(
             }
             // Timer::after_millis(100).await;
         }
-
     }
 }
 
@@ -321,7 +320,7 @@ where
     }
 
     pub async fn reset(&mut self) -> Result<(), Ina237Error<I>> {
-        info!("Resetting");
+        info!("ina237: Resetting");
         // Reset device and accumulation registers
         self.write_register(INA237_REG_CONFIG, INA237_CONFIG_RST)
             .await?;
@@ -340,7 +339,7 @@ where
         self.write_register(INA237_REG_ADC_CONFIG, config).await?;
 
         let calib = (819.2e6 * CURRENT_LSB * 0.015) as u16;
-        info!("calib: {}", calib);
+
         self.write_register(INA237_REG_SHUNT_CAL, calib).await?;
         Timer::after_millis(100).await;
 
@@ -445,7 +444,7 @@ where
                     }
 
                     attempts += 1;
-                    Timer::after_millis(1).await;
+                    Timer::after_millis(1 << attempts).await;
                     self.recoverable_errors += 1;
                     error!("Error reading register {} {:?}", register, e);
                 }
@@ -475,7 +474,7 @@ where
 
                     attempts += 1;
                     self.recoverable_errors += 1;
-                    Timer::after_millis(1).await;
+                    Timer::after_millis(1 << attempts).await;
                     error!("Error reading register {} {:?}", register, e);
                 }
             }
@@ -503,7 +502,7 @@ where
                     }
                     attempts += 1;
                     self.recoverable_errors += 1;
-                    Timer::after_millis(1).await;
+                    Timer::after_millis(1 << attempts).await;
                     error!("Error writing register {} {:?}", register, e);
                 }
             }

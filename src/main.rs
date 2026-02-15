@@ -107,13 +107,17 @@ async fn main(spawner: Spawner) {
     static TEMP_SENSOR: StaticCell<adc_temp_sensor::Sensor> = StaticCell::new();
     let temp_sensor = TEMP_SENSOR.init(adc_temp_sensor::Sensor { temp_sensor, adc });
 
+    let mut bus0_config = i2c::Config::default();
+    bus0_config.frequency = 10_000;
+
     let i2c_bus0 = I2C_BUS_0.init(Mutex::new(I2c::new_async(
         p.I2C0,
         p.PIN_5,
         p.PIN_4,
         Irqs,
-        i2c::Config::default(),
+        bus0_config,
     )));
+
     let sht30_device = Sht30Device::new(I2cDevice::new(i2c_bus0), sht30::SHT30_ADDR);
 
     let ina237_device = Ina237::new(I2cDevice::new(i2c_bus0), INA237_DEFAULT_ADDR)
